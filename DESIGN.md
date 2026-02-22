@@ -10,18 +10,18 @@
 
 1. [Executive Summary](#executive-summary)
 2. [Problem Statement](#problem-statement)
-3. [Goals & Objectives](#goals--objectives)
+3. [Goals & Objectives](#goals-objectives)
 4. [Requirements Specification](#requirements-specification)
 5. [System Architecture](#system-architecture)
 6. [Component Design](#component-design)
 7. [API Specifications](#api-specifications)
 8. [Data Models](#data-models)
-9. [Authentication & Security](#authentication--security)
+9. [Authentication & Security](#authentication-security)
 10. [Performance Considerations](#performance-considerations)
 11. [Error Handling Strategy](#error-handling-strategy)
 12. [Testing Strategy](#testing-strategy)
 13. [Deployment Architecture](#deployment-architecture)
-14. [Scalability & Future Enhancements](#scalability--future-enhancements)
+14. [Scalability & Future Enhancements](#scalability-future-enhancements)
 
 ---
 
@@ -30,10 +30,15 @@
 The OneNote MCP Server is a middleware service that enables AI language models to interact with Microsoft OneNote through the Model Context Protocol (MCP). It acts as a bridge between AI assistants and the Microsoft Graph API, providing a secure, efficient, and user-friendly interface for reading, writing, and managing OneNote content.
 
 **Key Value Propositions:**
+
 - Enables AI-powered note-taking and knowledge management
+
 - Provides natural language interface to OneNote operations
+
 - Maintains security through OAuth2 device code flow
+
 - Handles complex API interactions transparently
+
 - Supports advanced operations (search, filtering, content manipulation)
 
 ---
@@ -61,10 +66,15 @@ The OneNote MCP Server is a middleware service that enables AI language models t
 ### Solution Approach
 
 Build a Model Context Protocol (MCP) server that:
+
 - Abstracts Microsoft Graph API complexity
+
 - Provides simple, well-defined tools for AI assistants
+
 - Handles authentication, pagination, and error recovery
+
 - Processes content in multiple formats (HTML, plain text, markdown)
+
 - Enables AI to become a true productivity partner
 
 ---
@@ -96,8 +106,11 @@ Build a Model Context Protocol (MCP) server that:
 ### Secondary Goals
 
 - Extensibility for future Microsoft Graph endpoints
+
 - Comprehensive logging for debugging
+
 - Well-documented API surface
+
 - Language-agnostic design principles
 
 ---
@@ -107,6 +120,7 @@ Build a Model Context Protocol (MCP) server that:
 ### Functional Requirements
 
 #### FR-1: Authentication
+
 - **FR-1.1:** Support OAuth2 Device Code Flow for user authentication
 - **FR-1.2:** Persist access tokens securely to local filesystem
 - **FR-1.3:** Automatically refresh tokens before expiration
@@ -114,6 +128,7 @@ Build a Model Context Protocol (MCP) server that:
 - **FR-1.5:** Validate token scopes on startup
 
 #### FR-2: Read Operations
+
 - **FR-2.1:** List all notebooks accessible to authenticated user
 - **FR-2.2:** List sections within a specific notebook
 - **FR-2.3:** List pages within a specific section
@@ -125,6 +140,7 @@ Build a Model Context Protocol (MCP) server that:
 - **FR-2.9:** Support pagination for all list operations
 
 #### FR-3: Write Operations
+
 - **FR-3.1:** Create new pages with HTML or markdown content
 - **FR-3.2:** Update entire page content while preserving metadata
 - **FR-3.3:** Append content to existing pages
@@ -133,6 +149,7 @@ Build a Model Context Protocol (MCP) server that:
 - **FR-3.6:** Add structured content (tables, formatted notes)
 
 #### FR-4: Content Processing
+
 - **FR-4.1:** Convert HTML to readable plain text
 - **FR-4.2:** Generate text summaries with configurable length
 - **FR-4.3:** Convert markdown to HTML
@@ -140,6 +157,7 @@ Build a Model Context Protocol (MCP) server that:
 - **FR-4.5:** Handle Unicode and special characters correctly
 
 #### FR-5: Productivity Features
+
 - **FR-5.1:** Quick daily note creation with auto-formatted dates
 - **FR-5.2:** Find changes made by current user within date range
 - **FR-5.3:** Prevent duplicate daily note creation
@@ -148,30 +166,35 @@ Build a Model Context Protocol (MCP) server that:
 ### Non-Functional Requirements
 
 #### NFR-1: Performance
+
 - **NFR-1.1:** Page list operations complete within 5 seconds for 100 pages
 - **NFR-1.2:** Search operations scan 1000+ pages within 30 seconds
 - **NFR-1.3:** Content retrieval completes within 2 seconds per page
 - **NFR-1.4:** Support concurrent requests without blocking
 
 #### NFR-2: Reliability
+
 - **NFR-2.1:** 99.9% uptime during user sessions
 - **NFR-2.2:** Automatic retry with exponential backoff for transient failures
 - **NFR-2.3:** Graceful degradation when API limits are reached
 - **NFR-2.4:** No data loss during failures
 
 #### NFR-3: Security
+
 - **NFR-3.1:** Tokens stored with appropriate filesystem permissions
 - **NFR-3.2:** No tokens logged or transmitted insecurely
 - **NFR-3.3:** Minimal scopes requested (principle of least privilege)
 - **NFR-3.4:** Input validation on all user-provided data
 
 #### NFR-4: Usability
+
 - **NFR-4.1:** Clear error messages with actionable guidance
 - **NFR-4.2:** Progress indicators for long-running operations
 - **NFR-4.3:** Comprehensive documentation and examples
 - **NFR-4.4:** Tool names and parameters follow consistent conventions
 
 #### NFR-5: Maintainability
+
 - **NFR-5.1:** Modular architecture with clear separation of concerns
 - **NFR-5.2:** Comprehensive test coverage (>80% line coverage)
 - **NFR-5.3:** Code follows language-specific best practices
@@ -183,7 +206,7 @@ Build a Model Context Protocol (MCP) server that:
 
 ### High-Level Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                      AI Assistant                            │
 │              (Claude, GPT, etc.)                             │
@@ -228,7 +251,8 @@ Build a Model Context Protocol (MCP) server that:
 │              Microsoft Graph API                             │
 │              /v1.0/me/onenote/*                             │
 └──────────────────────────────────────────────────────────────┘
-```
+
+```text
 
 ### Component Interactions
 
@@ -250,23 +274,33 @@ Build a Model Context Protocol (MCP) server that:
 ### Design Patterns
 
 #### 1. Adapter Pattern
+
 - MCP Server adapts Graph API to MCP protocol
+
 - Translates between different data representations
 
 #### 2. Facade Pattern
+
 - Simple tool interface hides complex API operations
+
 - Single method call may trigger multiple API requests
 
 #### 3. Strategy Pattern
+
 - Different content formatting strategies (HTML, text, summary)
+
 - Pluggable authentication providers
 
 #### 4. Retry Pattern
+
 - Exponential backoff for transient failures
+
 - Circuit breaker for persistent errors
 
 #### 5. Repository Pattern
+
 - Token storage abstraction
+
 - Could support multiple storage backends
 
 ---
@@ -278,13 +312,18 @@ Build a Model Context Protocol (MCP) server that:
 **Responsibility:** Bridge between MCP protocol and application logic
 
 **Key Functions:**
+
 - Tool registration and discovery
+
 - Request deserialization and validation
+
 - Response serialization
+
 - Error message formatting
 
 **Interfaces:**
-```
+
+```text
 ToolRegistry:
   - registerTool(name, schema, handler)
   - listTools() → Tool[]
@@ -293,21 +332,28 @@ ToolRegistry:
 RequestHandler:
   - handleToolCall(request) → response
   - validateSchema(params, schema) → errors[]
-```
+
+```text
 
 ### 2. Authentication Manager
 
 **Responsibility:** OAuth2 flow and token lifecycle management
 
 **Key Functions:**
+
 - Initiate device code flow
+
 - Poll for authorization completion
+
 - Store tokens securely
+
 - Refresh tokens before expiration
+
 - Validate token scopes
 
 **Interfaces:**
-```
+
+```text
 AuthenticationService:
   - startDeviceCodeFlow() → DeviceCodeInfo
   - waitForAuthorization() → AccessToken
@@ -315,28 +361,35 @@ AuthenticationService:
   - saveToken(token) → void
   - refreshToken(token) → AccessToken
   - validateScopes(token, requiredScopes) → boolean
-```
 
+```text
 **State Machine:**
-```
+
+```text
 [Unauthenticated] → startDeviceCodeFlow() → [Awaiting User Auth]
 [Awaiting User Auth] → waitForAuthorization() → [Authenticated]
 [Authenticated] → tokenExpiring() → refreshToken() → [Authenticated]
 [Authenticated] → tokenInvalid() → [Unauthenticated]
-```
+
+```text
 
 ### 3. Graph API Client
 
 **Responsibility:** Communicate with Microsoft Graph API
 
 **Key Functions:**
+
 - HTTP request/response handling
+
 - Rate limit detection and backoff
+
 - Pagination traversal
+
 - Error classification and recovery
 
 **Interfaces:**
-```
+
+```text
 GraphClient:
   - get(endpoint, params) → Response
   - post(endpoint, data) → Response
@@ -347,20 +400,26 @@ RetryPolicy:
   - shouldRetry(error) → boolean
   - getBackoffDelay(attempt) → milliseconds
   - isRateLimitError(error) → boolean
-```
+
+```text
 
 ### 4. Content Processor
 
 **Responsibility:** Transform content between formats
 
 **Key Functions:**
+
 - HTML to plain text conversion
+
 - Markdown to HTML conversion
+
 - Text summarization
+
 - Structure extraction (headings, lists, tables)
 
 **Interfaces:**
-```
+
+```text
 ContentFormatter:
   - toPlainText(html) → string
   - toSummary(html, maxLength) → string
@@ -372,7 +431,8 @@ TextExtractor:
   - extractHeadings(html) → Heading[]
   - extractLists(html) → List[]
   - extractTables(html) → Table[]
-```
+
+```text
 
 ### 5. Tool Implementations
 
@@ -388,26 +448,33 @@ TextExtractor:
 - **Productivity Tools:** getMyRecentChanges, createDailyNote
 
 **Common Interface:**
-```
+
+```text
 Tool:
   - name: string
   - description: string
   - inputSchema: Schema
   - execute(params) → Result | Error
-```
+
+```text
 
 ### 6. Token Storage
 
 **Responsibility:** Persist authentication tokens
 
 **Key Functions:**
+
 - Write token to filesystem
+
 - Read token from filesystem
+
 - Verify file permissions
+
 - Handle corrupted token files
 
 **Interfaces:**
-```
+
+```text
 TokenStore:
   - save(token) → void | Error
   - load() → Token | null | Error
@@ -417,8 +484,8 @@ TokenStore:
 TokenFormat:
   - serialize(token) → string
   - deserialize(data) → Token | Error
-```
 
+```text
 ---
 
 ## API Specifications
@@ -431,15 +498,17 @@ TokenFormat:
 **Purpose:** Initiate OAuth2 device code flow
 
 **Input Schema:**
+
 ```json
 {
   "type": "object",
   "properties": {},
   "required": []
 }
-```
 
+```text
 **Output:**
+
 ```json
 {
   "userCode": "A1B2-C3D4",
@@ -448,25 +517,29 @@ TokenFormat:
   "interval": 5,
   "message": "Please visit the URL and enter the code to authenticate"
 }
-```
 
+```text
 **Errors:**
+
 - `AuthenticationTimeout`: User didn't complete auth within time limit
+
 - `AuthenticationDenied`: User denied permission request
 
 ##### `saveAccessToken`
 **Purpose:** Verify and load existing access token
 
 **Input Schema:**
+
 ```json
 {
   "type": "object",
   "properties": {},
   "required": []
 }
-```
 
+```text
 **Output:**
+
 ```json
 {
   "success": true,
@@ -476,7 +549,8 @@ TokenFormat:
   },
   "expiresOn": "2026-02-22T18:00:00Z"
 }
-```
+
+```text
 
 #### Read Operations
 
@@ -484,15 +558,17 @@ TokenFormat:
 **Purpose:** Retrieve all notebooks
 
 **Input Schema:**
+
 ```json
 {
   "type": "object",
   "properties": {},
   "required": []
 }
-```
 
+```text
 **Output:**
+
 ```json
 {
   "notebooks": [
@@ -506,12 +582,14 @@ TokenFormat:
   ],
   "count": 5
 }
-```
+
+```text
 
 ##### `searchPagesByDate`
 **Purpose:** Find pages within date range
 
 **Input Schema:**
+
 ```json
 {
   "type": "object",
@@ -537,9 +615,10 @@ TokenFormat:
   },
   "required": []
 }
-```
 
+```text
 **Output:**
+
 ```json
 {
   "pages": [
@@ -560,7 +639,8 @@ TokenFormat:
     "query": "standup"
   }
 }
-```
+
+```text
 
 #### Write Operations
 
@@ -568,6 +648,7 @@ TokenFormat:
 **Purpose:** Create a new OneNote page
 
 **Input Schema:**
+
 ```json
 {
   "type": "object",
@@ -587,9 +668,10 @@ TokenFormat:
   },
   "required": ["title", "content"]
 }
-```
 
+```text
 **Output:**
+
 ```json
 {
   "success": true,
@@ -598,17 +680,21 @@ TokenFormat:
   "webUrl": "https://onenote.com/...",
   "createdDateTime": "2026-02-22T10:00:00Z"
 }
-```
 
+```text
 **Errors:**
+
 - `SectionNotFound`: Specified section doesn't exist
+
 - `InvalidContent`: Content format is invalid
+
 - `QuotaExceeded`: User has reached storage limit
 
 ##### `appendToPage`
 **Purpose:** Add content to end of existing page
 
 **Input Schema:**
+
 ```json
 {
   "type": "object",
@@ -632,17 +718,18 @@ TokenFormat:
   },
   "required": ["pageId", "content"]
 }
-```
 
+```text
 **Output:**
+
 ```json
 {
   "success": true,
   "pageId": "page-id",
   "message": "Content appended successfully"
 }
-```
 
+```text
 ---
 
 ## Data Models
@@ -650,7 +737,8 @@ TokenFormat:
 ### Core Entities
 
 #### Notebook
-```
+
+```text
 Notebook {
   id: string (UUID)
   displayName: string
@@ -660,10 +748,12 @@ Notebook {
   webUrl: URL
   sections: Section[] (lazy-loaded)
 }
-```
+
+```text
 
 #### Section
-```
+
+```text
 Section {
   id: string (UUID)
   displayName: string
@@ -673,10 +763,12 @@ Section {
   parentNotebook: Notebook
   pagesUrl: URL
 }
-```
+
+```text
 
 #### Page
-```
+
+```text
 Page {
   id: string (UUID)
   title: string
@@ -689,10 +781,12 @@ Page {
   createdByAppId: string
   lastModifiedByAppId: string
 }
-```
+
+```text
 
 #### PageContent
-```
+
+```text
 PageContent {
   pageId: string
   htmlContent: string
@@ -701,12 +795,14 @@ PageContent {
   wordCount: integer (computed)
   lastFetched: ISO8601
 }
-```
+
+```text
 
 ### Authentication Models
 
 #### AccessToken
-```
+
+```text
 AccessToken {
   token: string (JWT or opaque)
   tokenType: "Bearer"
@@ -716,10 +812,12 @@ AccessToken {
   clientId: string
   userId: string (optional)
 }
-```
+
+```text
 
 #### DeviceCodeInfo
-```
+
+```text
 DeviceCodeInfo {
   userCode: string
   deviceCode: string (internal)
@@ -728,12 +826,14 @@ DeviceCodeInfo {
   interval: integer (polling seconds)
   message: string
 }
-```
+
+```text
 
 ### Error Models
 
 #### ErrorResponse
-```
+
+```text
 ErrorResponse {
   error: {
     code: string (e.g., "itemNotFound", "unauthenticated")
@@ -743,8 +843,8 @@ ErrorResponse {
     timestamp: ISO8601
   }
 }
-```
 
+```text
 ---
 
 ## Authentication & Security
@@ -779,13 +879,16 @@ ErrorResponse {
 ### Security Measures
 
 #### Token Protection
+
 - **Storage:** Filesystem with restricted permissions (600/-rw-------)
 - **Transmission:** Only over HTTPS to Microsoft endpoints
 - **Logging:** Token values never logged or displayed
 - **Lifecycle:** Automatic expiration and refresh
 
 #### Scope Management
+
 - **Minimal Scopes:** Request only necessary permissions
+
   - `Notes.Read`: Read OneNote content
   - `Notes.ReadWrite`: Modify existing OneNote content
   - `Notes.Create`: Create new pages/sections
@@ -793,12 +896,14 @@ ErrorResponse {
 - **No Write Access to Notebooks/Sections:** Cannot delete or restructure
 
 #### Input Validation
+
 - **Schema Validation:** All tool inputs validated against JSON schemas
 - **HTML Sanitization:** User-provided HTML sanitized before sending to OneNote
 - **SQL Injection Prevention:** N/A (no SQL database)
 - **Path Traversal Prevention:** Validate all file paths for token storage
 
 #### Error Handling
+
 - **No Sensitive Data Leakage:** Error messages don't expose tokens or internal details
 - **Fail Securely:** Authentication failures don't leave system in vulnerable state
 - **Audit Logging:** Security events logged for review
@@ -821,12 +926,14 @@ ErrorResponse {
 ### Optimization Strategies
 
 #### 1. Pagination
+
 - **Challenge:** OneNote accounts can have 100+ notebooks, 1000+ pages
 - **Solution:** Implement cursor-based pagination using `@odata.nextLink`
 - **Benefit:** Constant memory usage regardless of dataset size
 
 **Implementation:**
-```
+
+```text
 Function: paginateGraphRequest(endpoint, params)
   results = []
   url = buildInitialUrl(endpoint, params)
@@ -837,30 +944,37 @@ Function: paginateGraphRequest(endpoint, params)
     url = response.@odata.nextLink
   
   return results
-```
+
+```text
 
 #### 2. Rate Limit Handling
+
 - **Challenge:** Microsoft Graph has rate limits (varies by endpoint)
 - **Solution:** Exponential backoff with jitter
 - **Benefit:** Automatic recovery from rate limit errors
 
 **Backoff Formula:**
-```
+
+```text
 delay = min(maxDelay, baseDelay * (2 ^ attemptNumber)) + random(0, jitter)
-```
+
+```text
 
 #### 3. Content Streaming
+
 - **Challenge:** Large HTML pages consume memory
 - **Solution:** Stream processing for text extraction
 - **Benefit:** Lower memory footprint, faster processing
 
 #### 4. Concurrent Requests
+
 - **Challenge:** Sequential API calls slow for bulk operations
 - **Solution:** Parallel requests with concurrency limit
 - **Benefit:** Faster search across multiple notebooks
 
 **Concurrency Control:**
-```
+
+```text
 maxConcurrent = 5
 semaphore = Semaphore(maxConcurrent)
 
@@ -870,7 +984,8 @@ async Function: searchAllNotebooks(query)
     tasks.add(searchNotebook(notebook, query))
   
   return await parallel(tasks, semaphore)
-```
+
+```text
 
 ### Performance Targets
 
@@ -885,14 +1000,21 @@ async Function: searchAllNotebooks(query)
 ### Caching Strategy
 
 **Not Implemented (By Design):**
+
 - OneNote content changes frequently
+
 - Stale data unacceptable for user workflow
+
 - Cache invalidation complex across distributed system
+
 - Simplicity preferred over potential performance gain
 
 **Future Enhancement:**
+
 - Short-lived cache (30-60 seconds) for repeated queries
+
 - Cache invalidation on write operations
+
 - User-configurable cache duration
 
 ---
@@ -902,6 +1024,7 @@ async Function: searchAllNotebooks(query)
 ### Error Classification
 
 #### 1. Transient Errors (Retry)
+
 - **Network timeouts:** TCP connection failures, DNS resolution errors
 - **Rate limiting (429):** Too many requests to Graph API
 - **Server errors (5xx):** Microsoft Graph temporary outage
@@ -910,6 +1033,7 @@ async Function: searchAllNotebooks(query)
 **Handling:** Automatic retry with exponential backoff
 
 #### 2. Client Errors (No Retry)
+
 - **Authentication (401):** Invalid or expired token
 - **Authorization (403):** Insufficient permissions
 - **Not found (404):** Resource doesn't exist
@@ -918,6 +1042,7 @@ async Function: searchAllNotebooks(query)
 **Handling:** Return error to user with actionable message
 
 #### 3. Application Errors
+
 - **Validation errors:** Schema validation failures
 - **Business logic errors:** Duplicate daily note, invalid date format
 - **Content processing errors:** Malformed HTML, encoding issues
@@ -925,6 +1050,7 @@ async Function: searchAllNotebooks(query)
 **Handling:** Return descriptive error with suggested fix
 
 #### 4. Critical Errors
+
 - **Token storage failures:** Cannot read/write token file
 - **MCP protocol errors:** Cannot communicate with AI assistant
 - **Initialization failures:** Cannot start server
@@ -934,6 +1060,7 @@ async Function: searchAllNotebooks(query)
 ### Error Response Format
 
 **Standardized Structure:**
+
 ```json
 {
   "success": false,
@@ -948,32 +1075,42 @@ async Function: searchAllNotebooks(query)
     "timestamp": "2026-02-22T10:30:00Z"
   }
 }
-```
 
+```text
 **Error Codes:**
+
 - `AUTHENTICATION_REQUIRED`: User must authenticate
+
 - `TOKEN_EXPIRED`: Token needs refresh
+
 - `INVALID_INPUT`: Input validation failed
+
 - `RESOURCE_NOT_FOUND`: Notebook/section/page doesn't exist
+
 - `QUOTA_EXCEEDED`: User storage limit reached
+
 - `RATE_LIMIT_EXCEEDED`: API rate limit hit
+
 - `NETWORK_ERROR`: Network connectivity issue
+
 - `INTERNAL_ERROR`: Unexpected server error
 
 ### Retry Logic
 
 **Configuration:**
-```
+
+```text
 maxRetries = 3
 baseDelay = 1000ms
 maxDelay = 30000ms
 jitter = 500ms
 
 retriableStatusCodes = [408, 429, 500, 502, 503, 504]
-```
 
+```text
 **Algorithm:**
-```
+
+```text
 Function: retryWithBackoff(operation, maxRetries)
   for attempt in 1..maxRetries:
     try:
@@ -989,7 +1126,8 @@ Function: retryWithBackoff(operation, maxRetries)
       sleep(delay)
   
   throw MaxRetriesExceededError
-```
+
+```text
 
 ### Logging Strategy
 
@@ -1000,15 +1138,23 @@ Function: retryWithBackoff(operation, maxRetries)
 - **DEBUG:** Detailed diagnostic information
 
 **Logged Events:**
+
 - Authentication success/failure
+
 - API requests and responses (sanitized)
+
 - Retry attempts
+
 - Validation errors
+
 - Performance metrics
 
 **Security Considerations:**
+
 - Never log access tokens
+
 - Sanitize user input in logs
+
 - Rotate log files to prevent disk fill
 
 ---
@@ -1017,7 +1163,7 @@ Function: retryWithBackoff(operation, maxRetries)
 
 ### Test Pyramid
 
-```
+```text
         ┌────────────────┐
         │   E2E Tests    │  <- Manual, Real API
         │   (13 tests)   │
@@ -1028,7 +1174,8 @@ Function: retryWithBackoff(operation, maxRetries)
         │  Unit Tests    │  <- Isolated Functions
         │  (33 tests)    │
         └────────────────┘
-```
+
+```text
 
 ### Test Categories
 
@@ -1036,72 +1183,106 @@ Function: retryWithBackoff(operation, maxRetries)
 **Scope:** Individual functions in isolation
 
 **Covered:**
+
 - HTML to text conversion
+
 - Markdown to HTML conversion
+
 - Text summarization
+
 - Date parsing and formatting
+
 - Input validation
 
 **Approach:**
+
 - Pure function testing
+
 - No external dependencies
+
 - Fast execution (< 100ms total)
+
 - High code coverage (>80%)
 
 **Example:**
-```
+
+```text
 Test: extractReadableText()
   Input: "<html><body><h1>Title</h1><p>Content</p></body></html>"
   Expected: "Title\n-----\nContent\n\n"
   Assert: output matches expected format
-```
+
+```text
 
 #### 2. Integration Tests
 **Scope:** Component interactions with mocked APIs
 
 **Covered:**
+
 - Authentication flow (mocked OAuth endpoints)
+
 - Graph API calls (mocked HTTP responses)
+
 - Token storage and retrieval
+
 - Pagination logic
+
 - Error handling
 
 **Approach:**
+
 - Mock external dependencies (HTTP, filesystem)
+
 - Test realistic scenarios
+
 - Verify correct API calls made
+
 - Check error recovery
 
 **Tools:**
+
 - HTTP mocking library (e.g., nock)
+
 - Filesystem mocking (in-memory)
 
 **Example:**
-```
+
+```text
 Test: listNotebooks with pagination
   Mock: Graph API returns 2 pages of notebooks
   Execute: listNotebooks()
   Assert: All notebooks returned, correct API calls made
-```
+
+```text
 
 #### 3. End-to-End Tests
 **Scope:** Real API calls with actual OneNote account
 
 **Covered:**
+
 - Authentication with real OAuth flow
+
 - All read operations
+
 - All write operations
+
 - Search and filter operations
+
 - Error scenarios (404, rate limits)
 
 **Approach:**
+
 - Manual execution (not in CI)
+
 - Test OneNote account
+
 - Cleanup test data after run
+
 - Verify against real API behavior
 
 **Example:**
-```
+
+```text
 Test: Create and retrieve daily note
   1. Authenticate with test account
   2. Create daily note for today
@@ -1109,7 +1290,8 @@ Test: Create and retrieve daily note
   4. Retrieve note content
   5. Verify content matches
   6. Clean up test note
-```
+
+```text
 
 ### Test Coverage Goals
 
@@ -1129,8 +1311,11 @@ Test: Create and retrieve daily note
 5. **Security Audit:** Check for vulnerabilities in dependencies
 
 **Triggers:**
+
 - Every commit to main branch
+
 - Every pull request
+
 - Nightly builds
 
 **Matrix Testing:**
@@ -1140,17 +1325,27 @@ Test: Create and retrieve daily note
 ### Testing Anti-Patterns to Avoid
 
 ❌ **Don't:**
+
 - Test implementation details
+
 - Make real API calls in unit/integration tests
+
 - Share state between tests
+
 - Ignore test failures
+
 - Skip edge cases
 
 ✅ **Do:**
+
 - Test behavior and outputs
+
 - Mock external dependencies
+
 - Isolate test cases
+
 - Fix failures immediately
+
 - Test error paths
 
 ---
@@ -1163,24 +1358,29 @@ Test: Create and retrieve daily note
 **Use Case:** Developer testing and debugging
 
 **Architecture:**
-```
+
+```text
 Developer Machine
 ├── IDE / Text Editor
 ├── OneNote MCP Server (running locally)
 ├── AI Assistant (Claude Desktop / Cursor)
 └── Token Storage (.access-token.txt)
-```
 
+```text
 **Characteristics:**
+
 - Direct stdio communication
+
 - Local token storage
+
 - Hot reload for development
 
 #### 2. User Installation
 **Use Case:** End user productivity
 
 **Architecture:**
-```
+
+```text
 User Machine
 ├── AI Assistant (Claude Desktop)
 │   └── MCP Server Config (claude_desktop_config.json)
@@ -1189,8 +1389,8 @@ User Machine
 │   ├── Dependencies (npm packages)
 │   └── Token Storage
 └── Microsoft Graph API (cloud)
-```
 
+```text
 **Installation Steps:**
 1. Install Node.js (if not present)
 2. Clone or download server repository
@@ -1202,7 +1402,8 @@ User Machine
 **Use Case:** Team or organization
 
 **Architecture:**
-```
+
+```text
 Central Server
 ├── OneNote MCP Server Instances (per user)
 ├── Token Database (encrypted)
@@ -1213,18 +1414,24 @@ Users
 ├── User 1 → AI Assistant → HTTP Proxy → Server
 ├── User 2 → AI Assistant → HTTP Proxy → Server
 └── User N → AI Assistant → HTTP Proxy → Server
-```
 
+```text
 **Considerations:**
+
 - Secure token isolation per user
+
 - Horizontal scaling for concurrent users
+
 - Centralized logging and monitoring
+
 - User authentication and authorization
 
 ### Configuration Management
 
 **Environment Variables:**
+
 ```bash
+
 # Required
 AZURE_CLIENT_ID=<your-azure-app-client-id>
 
@@ -1233,9 +1440,10 @@ LOG_LEVEL=info|debug|warn|error
 TOKEN_STORAGE_PATH=/custom/path/to/token
 API_TIMEOUT_MS=30000
 MAX_RETRIES=3
-```
 
+```text
 **Configuration File (Optional):**
+
 ```json
 {
   "server": {
@@ -1257,7 +1465,8 @@ MAX_RETRIES=3
     "paginationLimit": 100
   }
 }
-```
+
+```text
 
 ### Packaging & Distribution
 
@@ -1267,29 +1476,45 @@ MAX_RETRIES=3
 3. **Binary Executable (Future):** Bundled Node.js + app
 
 **Version Management:**
+
 - Semantic versioning (MAJOR.MINOR.PATCH)
+
 - Changelog for each release
+
 - Migration guides for breaking changes
 
 ### Monitoring & Observability
 
 **Metrics to Track:**
+
 - Request count by tool
+
 - Success/failure rate
+
 - Average response time
+
 - Rate limit hits
+
 - Authentication failures
+
 - Active users (in multi-user deployment)
 
 **Health Checks:**
+
 - Server startup success
+
 - Graph API connectivity
+
 - Token validity
+
 - Disk space for logs
 
 **Alerting:**
+
 - High error rate
+
 - Authentication failures spike
+
 - API degradation
 
 ---
@@ -1309,13 +1534,18 @@ MAX_RETRIES=3
 **Challenge:** Support multiple concurrent users
 
 **Approach:**
+
 - Containerize server (Docker)
+
 - Deploy multiple instances with load balancer
+
 - Isolated token storage per user
+
 - Session affinity for user requests
 
 **Architecture:**
-```
+
+```text
 Load Balancer
 ├── Server Instance 1 (User A, User B)
 ├── Server Instance 2 (User C, User D)
@@ -1323,109 +1553,140 @@ Load Balancer
 
 Shared Storage
 └── Encrypted Token Database
-```
+
+```text
 
 #### Vertical Scaling
 **Challenge:** Handle large notebooks efficiently
 
 **Approach:**
+
 - Increase memory for large HTML processing
+
 - Optimize pagination logic
+
 - Stream processing for content extraction
+
 - Parallel API requests
 
 ### Future Enhancements
 
 #### 1. Advanced Search
+
 - **Full-text search across all pages**
+
   - Index page content locally
   - Support fuzzy matching and synonyms
   - Relevance ranking
 
 - **Semantic search**
+
   - Vector embeddings for pages
   - AI-powered similarity search
   - Related note discovery
 
 #### 2. Collaborative Features
+
 - **Share notes with other users**
+
   - Generate shareable links
   - Collaborate on pages in real-time
   - Track changes by multiple users
 
 - **Team workspaces**
+
   - Organization-wide notebooks
   - Role-based access control
   - Audit logging
 
 #### 3. Offline Capabilities
+
 - **Local cache for read operations**
+
   - Sync OneNote content to local database
   - Serve cached content when offline
   - Background sync when online
 
 - **Write queue**
+
   - Queue write operations when offline
   - Automatic sync when connectivity restored
   - Conflict resolution
 
 #### 4. Enhanced Content Processing
+
 - **AI-powered summarization**
+
   - Use LLM to generate summaries
   - Extract key points automatically
   - Sentiment analysis
 
 - **Content classification**
+
   - Auto-tagging based on content
   - Category suggestions
   - Duplicate detection
 
 #### 5. Backup & Sync
+
 - **Automated backups**
+
   - Export notebooks to local storage
   - Version history for pages
   - Restore from backup
 
 - **Cross-platform sync**
+
   - Sync with other note apps (Notion, Evernote)
   - Import/export in standard formats (Markdown, PDF)
   - Migration tools
 
 #### 6. Developer Tools
+
 - **SDK for custom integrations**
+
   - Client libraries (Python, JavaScript, Go)
   - Plugin system for extensions
   - Webhook support
 
 - **GraphQL API (Alternative)**
+
   - More flexible querying
   - Reduce over-fetching
   - Better client-side caching
 
 #### 7. Performance Optimizations
+
 - **HTTP/2 multiplexing**
+
   - Multiple concurrent requests
   - Reduced latency
 
 - **Content compression**
+
   - Gzip/Brotli for large HTML
   - Reduce bandwidth usage
 
 - **Intelligent prefetching**
+
   - Predict likely next requests
   - Preload commonly accessed pages
   - Background refresh
 
 #### 8. Security Enhancements
+
 - **Multi-factor authentication**
+
   - Require MFA for sensitive operations
   - Conditional access policies
 
 - **Encryption at rest**
+
   - Encrypt token storage
   - Secure key management
 
 - **Audit logging**
+
   - Track all user actions
   - Compliance reporting
   - Anomaly detection
@@ -1433,29 +1694,47 @@ Shared Storage
 ### Roadmap
 
 **Phase 1: Foundation (Complete)**
+
 - ✅ Core MCP server implementation
+
 - ✅ OAuth2 authentication
+
 - ✅ Basic CRUD operations
+
 - ✅ Search and filter
+
 - ✅ Content processing
+
 - ✅ Comprehensive testing
 
 **Phase 2: Enhancement (Current)**
+
 - 🔄 Performance optimizations
+
 - 🔄 Advanced search features
+
 - 🔄 Better error messages
+
 - 🔄 Documentation improvements
 
 **Phase 3: Scale (Planned)**
+
 - Multi-user support
+
 - Caching layer
+
 - Advanced productivity features
+
 - Analytics and insights
 
 **Phase 4: Enterprise (Future)**
+
 - Team collaboration
+
 - Compliance features
+
 - SSO integration
+
 - Premium support
 
 ---
@@ -1475,26 +1754,39 @@ Shared Storage
 ### Appendix B: References
 
 - [Model Context Protocol Specification](https://modelcontextprotocol.io/)
+
 - [Microsoft Graph API Documentation](https://learn.microsoft.com/en-us/graph/)
+
 - [OAuth 2.0 Device Authorization Grant](https://oauth.net/2/device-flow/)
+
 - [OneNote API Reference](https://learn.microsoft.com/en-us/graph/api/resources/onenote)
 
 ### Appendix C: Changelog
 
 **Version 1.0 (February 22, 2026)**
+
 - Initial design document
+
 - Complete architecture specification
+
 - Comprehensive requirements documentation
 
 ---
 
 **Document Maintenance:**
+
 - Review quarterly for accuracy
+
 - Update when major features added
+
 - Incorporate lessons learned from production
+
 - Gather feedback from developers and users
 
 **Contributors:**
+
 - Primary Author: Development Team
+
 - Technical Reviewers: Architecture Team
+
 - Last Review: February 22, 2026
