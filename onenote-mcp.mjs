@@ -1134,16 +1134,17 @@ server.tool(
       await ensureGraphClient();
       const pageInfo = await graphClient.api(`/me/onenote/pages/${pageId}`).get();
       const htmlContent = await fetchPageContentAdvanced(pageId, 'httpDirect');
+      const webUrl = pageInfo.links?.oneNoteWebUrl?.href || '';
       let resultText = '';
 
       if (format === 'html') {
-        resultText = `📄 **${pageInfo.title}** (HTML Format)\n\n${htmlContent}`;
+        resultText = `📄 **${pageInfo.title}** (HTML Format)${webUrl ? `\n🔗 <${webUrl}>` : ''}\n\n${htmlContent}`;
       } else if (format === 'summary') {
         const summary = extractTextSummary(htmlContent, 300);
-        resultText = `📄 **${pageInfo.title}** (Summary)\n\n${summary}`;
+        resultText = `📄 **${pageInfo.title}** (Summary)${webUrl ? `\n🔗 <${webUrl}>` : ''}\n\n${summary}`;
       } else { // 'text'
         const textContent = extractReadableText(htmlContent);
-        resultText = `📄 **${pageInfo.title}**\n📅 Modified: ${new Date(pageInfo.lastModifiedDateTime).toLocaleString()}\n\n${textContent}`;
+        resultText = `📄 **${pageInfo.title}**\n📅 Modified: ${new Date(pageInfo.lastModifiedDateTime).toLocaleString()}${webUrl ? `\n🔗 <${webUrl}>` : ''}\n\n${textContent}`;
       }
       return { content: [{ type: 'text', text: resultText }] };
     } catch (error) {
@@ -1196,15 +1197,16 @@ server.tool(
       }
 
       const htmlContent = await fetchPageContentAdvanced(matchingPage.id, 'httpDirect');
+      const webUrl = matchingPage.links?.oneNoteWebUrl?.href || '';
       let resultText = '';
       if (format === 'html') {
-        resultText = `📄 **${matchingPage.title}** (HTML Format)\n\n${htmlContent}`;
+        resultText = `📄 **${matchingPage.title}** (HTML Format)${webUrl ? `\n🔗 <${webUrl}>` : ''}\n\n${htmlContent}`;
       } else if (format === 'summary') {
         const summary = extractTextSummary(htmlContent, 300);
-        resultText = `📄 **${matchingPage.title}** (Summary)\n\n${summary}`;
+        resultText = `📄 **${matchingPage.title}** (Summary)${webUrl ? `\n🔗 <${webUrl}>` : ''}\n\n${summary}`;
       } else { // 'text'
         const textContent = extractReadableText(htmlContent);
-        resultText = `📄 **${matchingPage.title}**\n📅 Modified: ${new Date(matchingPage.lastModifiedDateTime).toLocaleString()}\n\n${textContent}`;
+        resultText = `📄 **${matchingPage.title}**\n📅 Modified: ${new Date(matchingPage.lastModifiedDateTime).toLocaleString()}${webUrl ? `\n🔗 <${webUrl}>` : ''}\n\n${textContent}`;
       }
       return { content: [{ type: 'text', text: resultText }] };
     } catch (error) {
@@ -1488,6 +1490,8 @@ server.tool(
         .header('Content-Type', 'application/xhtml+xml')
         .post(pageHtml);
       
+      const webUrl = response.links?.oneNoteWebUrl?.href || '';
+      
       return {
         content: [{
           type: 'text',
@@ -1495,7 +1499,7 @@ server.tool(
 **Title:** ${response.title}
 **Page ID:** ${response.id}
 **In Section:** ${targetSectionName}
-**Created:** ${new Date(response.createdDateTime).toLocaleString()}`
+**Created:** ${new Date(response.createdDateTime).toLocaleString()}${webUrl ? `\n\n🔗 <${webUrl}>` : ''}`
         }]
       };
     } catch (error) {
