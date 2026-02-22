@@ -2,9 +2,15 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-The OneNote MCP Server is a powerful Model Context Protocol (MCP) server that enables AI language models (LLMs) like Claude, and other AI assistants, to securely interact with your Microsoft OneNote data. It allows for reading, writing, searching, and comprehensive editing of your OneNote notebooks, sections, and pages directly through your AI interface.
+The OneNote MCP Server is a powerful Model Context Protocol (MCP) server
+that enables AI language models (LLMs) like Claude, and other AI assistants, to
+securely interact with your Microsoft OneNote data. It allows for reading,
+writing, searching, and comprehensive editing of your OneNote notebooks,
+sections, and pages directly through your AI interface.
 
-This server provides a rich set of tools for advanced OneNote management, including robust text extraction, HTML content processing, and fine-grained page manipulation.
+This server provides a rich set of tools for advanced OneNote management,
+including robust text extraction, HTML content processing, and fine-grained
+page manipulation.
 
 ## Features
 
@@ -48,8 +54,11 @@ This server provides a rich set of tools for advanced OneNote management, includ
 - **Git:** For cloning the repository. (Install from [git-scm.com](https://git-scm.com/))
 - **Microsoft Account:** An active Microsoft account with access to OneNote.
 - **Azure Application Registration (Recommended for Production/Shared Use):**
-  - While the server defaults to using the Microsoft Graph Explorer's public Client ID for easy testing, for regular or shared use, it is **strongly recommended** to create your own Azure App Registration.
-  - Ensure your app registration has the following delegated Microsoft Graph API permissions: `Notes.Read`, `Notes.ReadWrite`, `Notes.Create`, `User.Read`.
+  - While the server defaults to using the Microsoft Graph Explorer's public
+    Client ID for easy testing, for regular or shared use, it is **strongly
+    recommended** to create your own Azure App Registration.
+  - Ensure your app registration has the following delegated Microsoft Graph
+    API permissions: `Notes.Read`, `Notes.ReadWrite`, `Notes.Create`, `User.Read`.
   - You will need the "Application (client) ID" from your app registration.
 
 ## Installation
