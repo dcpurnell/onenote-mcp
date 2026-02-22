@@ -8,6 +8,7 @@ This document describes the testing strategy, setup, and best practices for the 
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
 - [Test Structure](#test-structure)
+- [Interactive Testing with MCP Inspector](#interactive-testing-with-mcp-inspector)
 - [Running Tests](#running-tests)
 - [Writing Tests](#writing-tests)
 - [Continuous Integration](#continuous-integration)
@@ -217,6 +218,177 @@ Success Rate: 100%
 ⚠️ **Rate limits**: Making many API calls may trigger Microsoft Graph rate limiting. Use read-only mode for frequent testing.
 
 ⚠️ **Production data**: These tests interact with your real OneNote account. Use a test account if possible.
+
+## Interactive Testing with MCP Inspector
+
+The **MCP Inspector** is an interactive testing tool provided by the Model Context Protocol team. It allows you to test your MCP server in real-time with a graphical interface, making it ideal for:
+
+- **Manual testing** of individual tools
+- **Debugging** tool parameters and responses
+- **Exploring** available tools and prompts
+- **Validating** real API interactions during development
+
+### Installing MCP Inspector
+
+Install the inspector globally via npm:
+
+```bash
+npm install -g @modelcontextprotocol/inspector
+```
+
+### Running the Inspector
+
+Start the MCP Inspector with your OneNote MCP server:
+
+```bash
+mcp-inspector node onenote-mcp.mjs
+```
+
+This will:
+
+1. Start your MCP server
+2. Launch a web-based inspector interface
+3. Open your default browser to the inspector UI (typically `http://localhost:5173`)
+
+### Using the Inspector Interface
+
+The inspector provides several panels:
+
+#### 1. Tools Panel
+
+- View all available tools (20+ OneNote operations)
+- See tool descriptions and parameter schemas
+- Test tools interactively with custom parameters
+
+#### 2. Prompts Panel
+
+- View available prompts (like daily standup)
+- Test prompt execution with arguments
+
+#### 3. Resources Panel
+
+- View available resources (if any)
+- Test resource loading
+
+#### 4. Server Logs Panel
+
+- See real-time console output from your server
+- Debug errors and trace execution
+- View `console.error()` statements for debugging
+
+### Testing Workflow Example
+
+Here's a typical workflow for testing with the inspector:
+
+1. **Start the inspector:**
+
+   ```bash
+   mcp-inspector node onenote-mcp.mjs
+   ```
+
+2. **Authenticate:**
+
+   - Ensure you have a valid `.access-token.txt` file
+   - Or run the OAuth flow first
+
+3. **Test a simple tool:**
+
+   - Select `listNotebooks` from the Tools panel
+   - Click "Run" (no parameters needed)
+   - View the response with your actual notebooks
+
+4. **Test a complex tool:**
+
+   - Select `searchPagesByDate` from the Tools panel
+   - Set parameters:
+     - `days`: 1
+     - `notebookName`: "SQLNikon" (optional)
+   - Click "Run"
+   - View matching pages in the response
+
+5. **Check server logs:**
+
+   - Switch to the Logs panel
+   - See debug output like:
+
+     ```text
+     Searching pages from last 1 day(s)...
+     Found 9 notebook(s), fetching sections...
+     Checked notebook "SQLNikon", 5 matches so far...
+     ```
+
+6. **Debug errors:**
+
+   - If a tool fails, check the error message in the response
+   - Review server logs for detailed stack traces
+   - Verify your authentication token is valid
+
+### Inspector Benefits vs Automated Tests
+
+**Use Inspector for:**
+
+- ✅ Quick manual testing during development
+- ✅ Validating real API responses
+- ✅ Debugging authentication issues
+- ✅ Exploring tool capabilities
+- ✅ Testing edge cases interactively
+
+**Use Automated Tests for:**
+
+- ✅ Regression testing
+- ✅ CI/CD pipelines
+- ✅ Unit testing individual functions
+- ✅ Testing with mocked APIs (no rate limits)
+- ✅ Validating code coverage
+
+### Common Inspector Use Cases
+
+**Testing a new tool:**
+
+```bash
+# 1. Start inspector
+mcp-inspector node onenote-mcp.mjs
+
+# 2. Select your new tool from the list
+# 3. Fill in test parameters
+# 4. Click "Run" and verify the response
+# 5. Check logs for any warnings/errors
+```
+
+**Debugging authentication:**
+
+```bash
+# If you see auth errors in the inspector:
+# 1. Check the Logs panel for specific error messages
+# 2. Verify .access-token.txt exists and is valid
+# 3. Try re-authenticating with the OAuth flow
+# 4. Test getUserInfo tool to verify token works
+```
+
+**Performance testing:**
+
+```bash
+# Test performance improvements:
+# 1. Run searchPagesByDate without notebookName parameter
+# 2. Note the time in server logs
+# 3. Run again with notebookName parameter
+# 4. Compare execution time
+```
+
+### Tips for Using the Inspector
+
+1. **Keep logs open**: The Logs panel shows valuable debugging information
+2. **Test incrementally**: Start with simple tools, then move to complex ones
+3. **Save test parameters**: Document successful parameter combinations
+4. **Watch for rate limits**: Making many requests may trigger API throttling
+5. **Use real data**: Inspector hits the actual OneNote API, not mocks
+
+### Stopping the Inspector
+
+To stop the inspector:
+
+- Press `Ctrl+C` in the terminal where it's running
+- Or close the terminal window
 
 ## Running Tests
 

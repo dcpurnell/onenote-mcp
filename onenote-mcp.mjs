@@ -265,6 +265,36 @@ async function paginateGraphRequest(apiPath, maxPages = null) {
 }
 
 /**
+ * Queries multiple sections in parallel with concurrency limiting.
+ * @param {Array} sections - Array of section objects to query.
+ * @param {Function} queryFn - Async function that takes a section and returns pages.
+ * @param {number} [concurrency=5] - Number of concurrent requests.
+ * @returns {Promise<Array>} Array of page objects with _section and _notebook added.
+ */
+async function queryAllSectionsParallel(sections, queryFn, concurrency = 5) {
+  let allPages = [];
+  
+  for (let i = 0; i < sections.length; i += concurrency) {
+    const batch = sections.slice(i, i + concurrency);
+    const batchResults = await Promise.allSettled(
+      batch.map(section => queryFn(section))
+    );
+    
+    // Process results
+    batchResults.forEach((result, idx) => {
+      if (result.status === 'fulfilled') {
+        allPages = allPages.concat(result.value);
+      } else {
+        const section = batch[idx];
+        console.error(`Error querying section "${section.displayName || section.name}": ${result.reason?.message}`);
+      }
+    });
+  }
+  
+  return allPages;
+}
+
+/**
  * Fetches the content of a OneNote page.
  * @param {string} pageId - The ID of the page.
  * @param {'httpDirect' | 'direct'} [method='httpDirect'] - The method to use for fetching.
@@ -503,18 +533,15 @@ server.tool(
       }
       
       let allPages = [];
-      // Iterate through notebooks and sections to get all pages
+      // Iterate through notebooks and query sections in parallel
       for (const notebook of notebooks) {
         const sections = await paginateGraphRequest(`/me/onenote/notebooks/${notebook.id}/sections`);
         
-        for (const section of sections) {
-          try {
-            const pages = await paginateGraphRequest(`/me/onenote/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links`);
-            allPages = allPages.concat(pages);
-          } catch (err) {
-            console.error(`Error fetching pages from section ${section.id}: ${err.message}`);
-          }
-        }
+        const pages = await queryAllSectionsParallel(sections, async (section) => {
+          return await paginateGraphRequest(`/me/onenote/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links`);
+        });
+        
+        allPages = allPages.concat(pages);
       }
       
       let filteredPages = allPages;
@@ -544,18 +571,30 @@ server.tool(
     query: z.string().describe('Optional keyword to filter page titles.').optional(),
     dateField: z.enum(['created', 'modified', 'both']).default('both').describe('Filter by created, modified, or both dates.').optional(),
     includeContent: z.boolean().default(false).describe('Include page content preview (slower).').optional(),
-    createdBy: z.string().describe('Optional: filter by creator name or email (e.g., "Josue" or "josue@elon.edu").').optional(),
-    modifiedBy: z.string().describe('Optional: filter by modifier name or email (e.g., "Josue" or "josue@elon.edu").').optional()
+    notebookName: z.string().describe('Optional: limit search to specific notebook name.').optional()
   },
-  async ({ days, query, dateField, includeContent, createdBy, modifiedBy }) => {
+  async ({ days, query, dateField, includeContent, notebookName }) => {
     try {
       await ensureGraphClient();
       const threshold = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      threshold.setHours(0, 0, 0, 0); // Start at midnight
       console.error(`Searching pages from last ${days} day(s) (since ${threshold.toLocaleString()})...`);
       
-      // Get all notebooks
+      // Get all notebooks (or filter by name)
       const notebooksResponse = await graphClient.api('/me/onenote/notebooks').get();
-      const notebooks = notebooksResponse.value || [];
+      let notebooks = notebooksResponse.value || [];
+      
+      // Filter by notebook name if specified
+      if (notebookName) {
+        const searchTerm = notebookName.toLowerCase();
+        notebooks = notebooks.filter(nb => 
+          (nb.displayName || nb.name || '').toLowerCase().includes(searchTerm)
+        );
+        
+        if (notebooks.length === 0) {
+          return { content: [{ type: 'text', text: `📚 No notebook found matching "${notebookName}".` }] };
+        }
+      }
       
       if (notebooks.length === 0) {
         return { content: [{ type: 'text', text: '📚 No notebooks found.' }] };
@@ -565,82 +604,61 @@ server.tool(
       let allMatchingPages = [];
       let totalSectionsChecked = 0;
       
-      // Iterate through notebooks and sections
+      // Iterate through notebooks and query sections in parallel
       for (const notebook of notebooks) {
         const sections = await paginateGraphRequest(`/me/onenote/notebooks/${notebook.id}/sections`);
         totalSectionsChecked += sections.length;
         
-        for (const section of sections) {
-          try {
-            const apiPath = `/me/onenote/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$expand=lastModifiedBy,createdBy&$top=100`;
-            const pages = await paginateGraphRequest(apiPath);
+        // Query all sections in parallel
+        const pages = await queryAllSectionsParallel(sections, async (section) => {
+          const sectionPages = await paginateGraphRequest(`/me/onenote/sections/${section.id}/pages`);
+          
+          // Filter by date and query
+          const matchingPages = sectionPages.filter(page => {
+            const created = new Date(page.createdDateTime);
+            const modified = new Date(page.lastModifiedDateTime);
             
-            // Filter by date
-            const matchingPages = pages.filter(page => {
-              const created = new Date(page.createdDateTime);
-              const modified = new Date(page.lastModifiedDateTime);
-              
-              let dateMatch = false;
-              if (dateField === 'created') {
-                dateMatch = created >= threshold;
-              } else if (dateField === 'modified') {
-                dateMatch = modified >= threshold;
-              } else { // 'both'
-                dateMatch = created >= threshold || modified >= threshold;
-              }
-              
-              if (!dateMatch) return false;
-              
-              // Optional keyword filter
-              if (query) {
-                const searchTerm = query.toLowerCase();
-                if (!page.title || !page.title.toLowerCase().includes(searchTerm)) {
-                  return false;
-                }
-              }
-              
-              // Optional createdBy filter
-              if (createdBy) {
-                const filterTerm = createdBy.toLowerCase();
-                const creatorName = page.createdBy?.user?.displayName?.toLowerCase() || '';
-                const creatorEmail = page.createdBy?.user?.email?.toLowerCase() || '';
-                if (!creatorName.includes(filterTerm) && !creatorEmail.includes(filterTerm)) {
-                  return false;
-                }
-              }
-              
-              // Optional modifiedBy filter
-              if (modifiedBy) {
-                const filterTerm = modifiedBy.toLowerCase();
-                const modifierName = page.lastModifiedBy?.user?.displayName?.toLowerCase() || '';
-                const modifierEmail = page.lastModifiedBy?.user?.email?.toLowerCase() || '';
-                if (!modifierName.includes(filterTerm) && !modifierEmail.includes(filterTerm)) {
-                  return false;
-                }
-              }
-              
-              return true;
-            });
+            let dateMatch = false;
+            if (dateField === 'created') {
+              dateMatch = created >= threshold;
+            } else if (dateField === 'modified') {
+              dateMatch = modified >= threshold;
+            } else { // 'both'
+              dateMatch = created >= threshold || modified >= threshold;
+            }
             
-            // Add notebook and section context
-            matchingPages.forEach(page => {
-              page._notebook = notebook.displayName || notebook.name;
-              page._section = section.displayName || section.name;
-            });
+            if (!dateMatch) return false;
             
-            allMatchingPages = allMatchingPages.concat(matchingPages);
-          } catch (sectionError) {
-            console.error(`Error fetching pages from section ${section.displayName}: ${sectionError.message}`);
-          }
-        }
+            // Optional keyword filter
+            if (query) {
+              const searchTerm = query.toLowerCase();
+              if (!page.title || !page.title.toLowerCase().includes(searchTerm)) {
+                return false;
+              }
+            }
+            
+            return true;
+          });
+          
+          // Add notebook and section context
+          matchingPages.forEach(page => {
+            page._notebook = notebook.displayName || notebook.name;
+            page._section = section.displayName || section.name;
+          });
+          
+          return matchingPages;
+        });
         
+        allMatchingPages = allMatchingPages.concat(pages);
         console.error(`Checked notebook "${notebook.displayName}", ${allMatchingPages.length} matches so far...`);
       }
       
       console.error(`Search complete: ${allMatchingPages.length} matches from ${totalSectionsChecked} sections`);
       
       if (allMatchingPages.length === 0) {
-        return { content: [{ type: 'text', text: query ? `🔍 No pages found matching "${query}" in the last ${days} day(s).` : `📄 No pages found in the last ${days} day(s).` }] };
+        // Add debug info to help diagnose
+        const debugInfo = `\n\n🔍 **Debug Info:**\n- Threshold: ${threshold.toLocaleString()}\n- Days back: ${days}\n- Notebooks checked: ${notebooks.length}\n- Sections checked: ${totalSectionsChecked}\n- Date field: ${dateField}`;
+        return { content: [{ type: 'text', text: (query ? `🔍 No pages found matching "${query}" in the last ${days} day(s).` : `📄 No pages found in the last ${days} day(s).`) + debugInfo }] };
       }
       
       // Sort by most recent first
@@ -649,8 +667,7 @@ server.tool(
       // Format results
       let resultText = `🔍 **Date Search Results** (${allMatchingPages.length} found in last ${days} day(s)):\n`;
       if (query) resultText += `Keyword: "${query}"\n`;
-      if (createdBy) resultText += `Created by: "${createdBy}"\n`;
-      if (modifiedBy) resultText += `Modified by: "${modifiedBy}"\n`;
+      if (notebookName) resultText += `Notebook: "${notebookName}"\n`;
       resultText += `Checked: ${notebooks.length} notebooks, ${totalSectionsChecked} sections\n\n`;
       
       const displayPages = allMatchingPages.slice(0, 20);
@@ -660,26 +677,20 @@ server.tool(
         resultText += `${i + 1}. **${page.title}**\n`;
         resultText += `   📚 ${page._notebook} / 📂 ${page._section}\n`;
         if (webUrl) resultText += `   🔗 <${webUrl}>\n`;
-        resultText += `   Created: ${new Date(page.createdDateTime).toLocaleString()}`;
-        if (page.createdBy?.user?.displayName) {
-          resultText += ` by ${page.createdBy.user.displayName}`;
-        }
-        resultText += `\n   Modified: ${new Date(page.lastModifiedDateTime).toLocaleString()}`;
-        if (page.lastModifiedBy?.user?.displayName) {
-          resultText += ` by ${page.lastModifiedBy.user.displayName}`;
-        }
+        resultText += `   Created: ${new Date(page.createdDateTime).toLocaleString()}\n`;
+        resultText += `   Modified: ${new Date(page.lastModifiedDateTime).toLocaleString()}\n`;
         
         if (includeContent) {
           try {
             const htmlContent = await fetchPageContentAdvanced(page.id, 'httpDirect');
             const preview = extractTextSummary(htmlContent, 200);
-            resultText += `\n   Preview: ${preview}`;
+            resultText += `   Preview: ${preview}\n`;
           } catch (contentError) {
-            resultText += `\n   Preview: (error loading content)`;
+            resultText += `   Preview: (error loading content)\n`;
           }
         }
         
-        resultText += '\n\n';
+        resultText += '\n';
       }
       
       if (allMatchingPages.length > 20) {
@@ -820,16 +831,11 @@ server.tool(
   {
     sinceDate: z.string().describe('Start date in YYYY-MM-DD format, or "monday" for last Monday.').optional(),
     days: z.number().min(1).describe('Alternative: number of days back to search (e.g., 3 for last 3 days).').optional(),
-    notebookId: z.string().describe('Optional: limit to specific notebook.').optional(),
-    includeCreator: z.boolean().default(false).describe('Show who created/modified each page.').optional()
+    notebookId: z.string().describe('Optional: limit to specific notebook.').optional()
   },
-  async ({ sinceDate, days, notebookId, includeCreator }) => {
+  async ({ sinceDate, days, notebookId }) => {
     try {
       await ensureGraphClient();
-      
-      // Get current user info
-      const userInfo = await graphClient.api('/me').get();
-      const currentUserEmail = userInfo.userPrincipalName?.toLowerCase();
       
       // Calculate threshold date
       let threshold;
@@ -841,14 +847,15 @@ server.tool(
         threshold.setHours(0, 0, 0, 0);
       } else if (sinceDate) {
         threshold = new Date(sinceDate);
+        threshold.setHours(0, 0, 0, 0);
       } else if (days) {
         threshold = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+        threshold.setHours(0, 0, 0, 0);
       } else {
         // Default to last 3 days
         threshold = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+        threshold.setHours(0, 0, 0, 0);
       }
-      
-      console.error(`Finding your changes since ${threshold.toLocaleDateString()}...`);
       
       // Get notebooks
       let notebooks = [];
@@ -860,51 +867,52 @@ server.tool(
         notebooks = response.value || [];
       }
       
-      let myChanges = [];
+      let recentPages = [];
       
       for (const notebook of notebooks) {
         const sections = await paginateGraphRequest(`/me/onenote/notebooks/${notebook.id}/sections`);
         
-        for (const section of sections) {
-          try {
-            const apiPath = `/me/onenote/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$expand=lastModifiedBy,createdBy&$top=100`;
-            const pages = await paginateGraphRequest(apiPath);
-            
-            const myPages = pages.filter(page => {
-              const modified = new Date(page.lastModifiedDateTime);
-              if (modified < threshold) return false;
-              
-              // Check if current user modified it
-              const modifierEmail = page.lastModifiedBy?.user?.email?.toLowerCase();
-              return modifierEmail === currentUserEmail;
-            });
-            
-            myPages.forEach(page => {
-              page._notebook = notebook.displayName || notebook.name;
-              page._section = section.displayName || section.name;
-            });
-            
-            myChanges = myChanges.concat(myPages);
-          } catch (sectionError) {
-            console.error(`Error in section ${section.displayName}: ${sectionError.message}`);
-          }
-        }
+        // Query all sections in parallel
+        const pages = await queryAllSectionsParallel(sections, async (section) => {
+          const sectionPages = await paginateGraphRequest(`/me/onenote/sections/${section.id}/pages`);
+          
+          // Filter by modification date
+          const matchingPages = sectionPages.filter(page => {
+            const modified = new Date(page.lastModifiedDateTime);
+            return modified >= threshold;
+          });
+          
+          // Add notebook and section context
+          matchingPages.forEach(page => {
+            page._notebook = notebook.displayName || notebook.name;
+            page._section = section.displayName || section.name;
+          });
+          
+          return matchingPages;
+        });
+        
+        recentPages = recentPages.concat(pages);
       }
       
-      console.error(`Found ${myChanges.length} pages you modified`);
       
-      if (myChanges.length === 0) {
-        return { content: [{ type: 'text', text: `📝 No pages found that you modified since ${threshold.toLocaleDateString()}.` }] };
+      if (recentPages.length === 0) {
+        return { 
+          content: [{ 
+            type: 'text', 
+            text: `📝 No pages modified in your notebooks since ${threshold.toLocaleDateString()}.` 
+          }] 
+        };
       }
       
       // Sort by most recent
-      myChanges.sort((a, b) => new Date(b.lastModifiedDateTime) - new Date(a.lastModifiedDateTime));
+      recentPages.sort((a, b) => new Date(b.lastModifiedDateTime) - new Date(a.lastModifiedDateTime));
       
-      let resultText = `📝 **Your Recent Changes** (${myChanges.length} pages since ${threshold.toLocaleDateString()}):\n\n`;
+      let resultText = `📝 **Recent Changes in Your Notebooks** (${recentPages.length} pages since ${threshold.toLocaleDateString()}):\n\n`;
+      resultText += `_Note: Includes changes by you and collaborators in your notebooks._\n`;
       
       // Group by notebook
       const byNotebook = {};
-      myChanges.forEach(page => {
+      recentPages.forEach(page => {
         const nb = page._notebook;
         if (!byNotebook[nb]) byNotebook[nb] = [];
         byNotebook[nb].push(page);
@@ -919,9 +927,6 @@ server.tool(
           resultText += `   📂 ${page._section}\n`;
           if (webUrl) resultText += `   🔗 <${webUrl}>\n`;
           resultText += `   Modified: ${new Date(page.lastModifiedDateTime).toLocaleString()}\n`;
-          if (includeCreator && page.createdBy?.user?.displayName) {
-            resultText += `   Created by: ${page.createdBy.user.displayName}\n`;
-          }
         });
       }
       
@@ -1047,42 +1052,38 @@ server.tool(
       }
       
       console.error(`Found ${sections.length} section(s), searching pages...`);
-      let allMatchingPages = [];
       const threshold = days ? new Date(Date.now() - days * 24 * 60 * 60 * 1000) : null;
       
-      for (const section of sections) {
-        try {
-          const apiPath = `/me/onenote/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=${top}`;
-          const pages = await paginateGraphRequest(apiPath);
-          
-          const matchingPages = pages.filter(page => {
-            // Date filter if specified
-            if (threshold) {
-              const created = new Date(page.createdDateTime);
-              const modified = new Date(page.lastModifiedDateTime);
-              if (created < threshold && modified < threshold) {
-                return false;
-              }
+      // Query all sections in parallel
+      const allMatchingPages = await queryAllSectionsParallel(sections, async (section) => {
+        const apiPath = `/me/onenote/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=${top}`;
+        const pages = await paginateGraphRequest(apiPath);
+        
+        const matchingPages = pages.filter(page => {
+          // Date filter if specified
+          if (threshold) {
+            const created = new Date(page.createdDateTime);
+            const modified = new Date(page.lastModifiedDateTime);
+            if (created < threshold && modified < threshold) {
+              return false;
             }
-            
-            // Keyword filter if specified
-            if (query) {
-              const searchTerm = query.toLowerCase();
-              return page.title && page.title.toLowerCase().includes(searchTerm);
-            }
-            
-            return true;
-          });
+          }
           
-          matchingPages.forEach(page => {
-            page._section = section.displayName || section.name;
-          });
+          // Keyword filter if specified
+          if (query) {
+            const searchTerm = query.toLowerCase();
+            return page.title && page.title.toLowerCase().includes(searchTerm);
+          }
           
-          allMatchingPages = allMatchingPages.concat(matchingPages);
-        } catch (sectionError) {
-          console.error(`Error in section ${section.displayName}: ${sectionError.message}`);
-        }
-      }
+          return true;
+        });
+        
+        matchingPages.forEach(page => {
+          page._section = section.displayName || section.name;
+        });
+        
+        return matchingPages;
+      });
       
       console.error(`Search complete: ${allMatchingPages.length} matches`);
       

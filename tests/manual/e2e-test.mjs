@@ -277,6 +277,65 @@ async function testSearchPagesByDate() {
   }
 }
 
+async function testSearchPagesByDateThreeDays() {
+  try {
+    if (!testData.notebookId) {
+      skipTest('searchPagesByDate (3 days)', 'No notebook ID available');
+      return null;
+    }
+    
+    // Calculate threshold (3 days ago)
+    const threeDaysAgo = new Date();
+    threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+    threeDaysAgo.setHours(0, 0, 0, 0);
+
+    // Get all sections in the notebook
+    const sectionsResponse = await graphClient
+      .api(`/me/onenote/notebooks/${testData.notebookId}/sections`)
+      .get();
+
+    log(`  Checking ${sectionsResponse.value.length} section(s)...`);
+
+    let allMatchingPages = [];
+
+    // Query each section for pages
+    for (const section of sectionsResponse.value) {
+      try {
+        const pagesResponse = await graphClient
+          .api(`/me/onenote/sections/${section.id}/pages`)
+          .select('id,title,createdDateTime,lastModifiedDateTime')
+          .get();
+
+        // Filter by date (client-side, as the tool does)
+        const matchingPages = pagesResponse.value.filter(page => {
+          const modified = new Date(page.lastModifiedDateTime);
+          return modified >= threeDaysAgo;
+        });
+
+        allMatchingPages = allMatchingPages.concat(matchingPages);
+      } catch (sectionError) {
+        log(`  Warning: Error querying section ${section.displayName}: ${sectionError.message}`, colors.yellow);
+      }
+    }
+
+    // Sort by most recent
+    allMatchingPages.sort((a, b) => 
+      new Date(b.lastModifiedDateTime) - new Date(a.lastModifiedDateTime)
+    );
+
+    log(`  Found ${allMatchingPages.length} page(s) modified in last 3 days`);
+    if (allMatchingPages.length > 0) {
+      log(`  Most recent: "${allMatchingPages[0].title}" (${new Date(allMatchingPages[0].lastModifiedDateTime).toLocaleDateString()})`);
+    }
+    
+    recordTest('searchPagesByDate (3 days)', true);
+    return allMatchingPages;
+  } catch (error) {
+    recordTest('searchPagesByDate (3 days)', false, error);
+    return null;
+  }
+}
+
 async function testGetPageContent() {
   if (!testData.pageId) {
     skipTest('getPageContent', 'No page ID available');
@@ -601,6 +660,8 @@ async function runAllTests() {
   await testSearchPages();
   await sleep(500);
   await testSearchPagesByDate();
+  await sleep(500);
+  await testSearchPagesByDateThreeDays();
   await sleep(500);
   await testGetPageByTitle();
   await sleep(500);
