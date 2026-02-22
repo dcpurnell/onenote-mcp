@@ -22,6 +22,7 @@
 12. [Testing Strategy](#testing-strategy)
 13. [Deployment Architecture](#deployment-architecture)
 14. [Scalability & Future Enhancements](#scalability-future-enhancements)
+15. [Appendices](#appendices)
 
 ---
 

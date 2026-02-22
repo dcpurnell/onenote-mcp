@@ -41,7 +41,6 @@ This server provides a rich set of tools for advanced OneNote management, includ
   - Markdown-to-HTML conversion for page content.
 - **Robust Input Validation:** Uses Zod for defining and validating tool input schemas.
 
-
 ## Prerequisites
 
 - **Node.js:** Version 18.x or later is recommended. (Install from [nodejs.org](https://nodejs.org/))
@@ -225,8 +224,6 @@ Once connected and authenticated, you can ask your AI assistant to perform tasks
 - "Append 'Follow up with John Doe' to the OneNote page with ID 'your-page-id-here'."
 - "In my OneNote page 'Recipe Ideas', replace all instances of 'sugar' with 'sweetener'."
 
-
-
 ## Troubleshooting
 
 - **Authentication Issues:**
@@ -240,7 +237,6 @@ Once connected and authenticated, you can ask your AI assistant to perform tasks
   - Verify the `command` and `args` (especially the absolute path to `onenote-mcp.mjs`) in your client's MCP server configuration are correct.
   - Restart the MCP client after making configuration changes.
   - Check the MCP client's logs and the server's console output for errors.
-
 
 ## Security Notes
 
