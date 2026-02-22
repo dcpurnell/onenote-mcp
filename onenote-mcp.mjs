@@ -492,13 +492,35 @@ server.tool(
   async ({ query }) => {
     try {
       await ensureGraphClient();
-      console.error('Searching pages with pagination...');
-      const pages = await paginateGraphRequest('/me/onenote/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links');
+      console.error('Searching pages across all sections...');
       
-      let filteredPages = pages;
+      // Get all notebooks
+      const notebooksResponse = await graphClient.api('/me/onenote/notebooks').get();
+      const notebooks = notebooksResponse.value || [];
+      
+      if (notebooks.length === 0) {
+        return { content: [{ type: 'text', text: '📚 No notebooks found.' }] };
+      }
+      
+      let allPages = [];
+      // Iterate through notebooks and sections to get all pages
+      for (const notebook of notebooks) {
+        const sections = await paginateGraphRequest(`/me/onenote/notebooks/${notebook.id}/sections`);
+        
+        for (const section of sections) {
+          try {
+            const pages = await paginateGraphRequest(`/me/onenote/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links`);
+            allPages = allPages.concat(pages);
+          } catch (err) {
+            console.error(`Error fetching pages from section ${section.id}: ${err.message}`);
+          }
+        }
+      }
+      
+      let filteredPages = allPages;
       if (query) {
         const searchTerm = query.toLowerCase();
-        filteredPages = pages.filter(page => page.title && page.title.toLowerCase().includes(searchTerm));
+        filteredPages = allPages.filter(page => page.title && page.title.toLowerCase().includes(searchTerm));
       }
       
       if (filteredPages.length > 0) {
@@ -1141,11 +1163,34 @@ server.tool(
   async ({ title, format }) => {
     try {
       await ensureGraphClient();
-      const pagesResponse = await graphClient.api('/me/onenote/pages').get();
-      const matchingPage = (pagesResponse.value || []).find(p => p.title && p.title.toLowerCase().includes(title.toLowerCase()));
+      
+      // Get all notebooks
+      const notebooksResponse = await graphClient.api('/me/onenote/notebooks').get();
+      const notebooks = notebooksResponse.value || [];
+      
+      if (notebooks.length === 0) {
+        return { isError: true, content: [{ type: 'text', text: '📚 No notebooks found.' }] };
+      }
+      
+      let allPages = [];
+      // Iterate through notebooks and sections to get all pages
+      for (const notebook of notebooks) {
+        const sections = await paginateGraphRequest(`/me/onenote/notebooks/${notebook.id}/sections`);
+        
+        for (const section of sections) {
+          try {
+            const pages = await paginateGraphRequest(`/me/onenote/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links`);
+            allPages = allPages.concat(pages);
+          } catch (err) {
+            console.error(`Error fetching pages from section ${section.id}: ${err.message}`);
+          }
+        }
+      }
+      
+      const matchingPage = allPages.find(p => p.title && p.title.toLowerCase().includes(title.toLowerCase()));
 
       if (!matchingPage) {
-        const availablePages = (pagesResponse.value || []).slice(0, 10).map(p => `- ${p.title}`).join('\n');
+        const availablePages = allPages.slice(0, 10).map(p => `- ${p.title}`).join('\n');
         return { isError: true, content: [{ type: 'text', text: `❌ No page found with title containing "${title}".\n\nAvailable pages (up to 10):\n${availablePages || 'None'}` }] };
       }
 

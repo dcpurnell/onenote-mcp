@@ -13,6 +13,9 @@ yarn-error.log*
 .env.local
 .env.*.local
 
+# Sensitive files
+.access-token.txt
+
 # OS files
 .DS_Store
 Thumbs.db
@@ -23,3 +26,12 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# Test coverage and results
+coverage/
+.nyc_output/
+test-results/
+*.lcov
+
+# Test fixtures that shouldn't be committed
+tests/fixtures/.test-access-token.txt
