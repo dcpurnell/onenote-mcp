@@ -206,6 +206,7 @@ This server exposes the following tools to your AI assistant:
 
 - `authenticate`: Initiates the device code authentication flow with Microsoft Graph.
 - `saveAccessToken`: Loads and verifies the locally saved access token.
+- `checkTokenScopes`: Decodes your JWT token to show what API permissions (scopes) were actually granted. Use this to diagnose why notebooks might not be appearing. See [AUTH_TROUBLESHOOTING.md](AUTH_TROUBLESHOOTING.md) for details.
 
 **Reading OneNote Data:**
 
@@ -283,10 +284,26 @@ Once connected and authenticated, you can ask your AI assistant to perform tasks
 
 ## Troubleshooting
 
+### 📋 Common Issues & Solutions
+
+**🔐 No Notebooks Found / Empty Results?**
+
+If you're authenticated but `listNotebooks` returns nothing, this is usually a **permissions/scope issue**.
+
+**→ See the complete [Authentication & Permissions Troubleshooting Guide](AUTH_TROUBLESHOOTING.md)**
+
+Quick fix:
+1. Run the `checkTokenScopes` tool to see what permissions you have
+2. If missing `Notes.Read.All` or `Notes.ReadWrite.All`, you need to configure your Azure AD app registration
+3. Follow the detailed guide to add proper API permissions
+
+---
+
 - **Authentication Issues:**
   - Ensure your `AZURE_CLIENT_ID` (if set) is correct and has the required API permissions.
   - If the device code flow fails, try in a different browser or an incognito/private window.
   - Token expiry: If tools stop working, you may need to re-run the `authenticate` tool.
+  - **Empty notebook list:** Check permissions with `checkTokenScopes` - see [AUTH_TROUBLESHOOTING.md](AUTH_TROUBLESHOOTING.md)
 - **Server Not Starting:**
   - Check Node.js version (`node -v`).
   - Ensure all dependencies are installed (`npm install`).

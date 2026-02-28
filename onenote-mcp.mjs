@@ -686,6 +686,78 @@ Token loaded and verified.
   }
 );
 
+server.tool(
+  'checkTokenScopes',
+  {
+    // No input parameters
+  },
+  async () => {
+    try {
+      loadExistingToken();
+      if (!accessToken) {
+        return { isError: true, content: [{ type: 'text', text: `❌ **No Token Found.** Please run the 'authenticate' tool first.` }] };
+      }
+
+      // Decode JWT token (format: header.payload.signature)
+      const parts = accessToken.split('.');
+      if (parts.length !== 3) {
+        return { isError: true, content: [{ type: 'text', text: `❌ **Invalid Token Format.** Token doesn't appear to be a valid JWT.` }] };
+      }
+
+      // Decode the payload (base64url encoded)
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf-8'));
+      
+      // Extract scope information
+      const scopes = payload.scp ? payload.scp.split(' ') : [];
+      const audience = payload.aud || 'Unknown';
+      const issuer = payload.iss || 'Unknown';
+      const expiration = payload.exp ? new Date(payload.exp * 1000).toISOString() : 'Unknown';
+      const appId = payload.appid || payload.azp || 'Unknown';
+      
+      // Check for required OneNote scopes
+      const requiredScopes = ['Notes.Read.All', 'Notes.ReadWrite.All'];
+      const hasRequiredScopes = requiredScopes.some(scope => scopes.includes(scope));
+      const missingScopes = requiredScopes.filter(scope => !scopes.includes(scope));
+      
+      let message = `🔍 **Token Scope Analysis**
+
+**Granted Scopes:**
+${scopes.length > 0 ? scopes.map(s => `  • ${s}`).join('\n') : '  (None found)'}
+
+**Audience:** ${audience}
+**App ID:** ${appId}
+**Expires:** ${expiration}
+
+**OneNote Access Check:**`;
+
+      if (hasRequiredScopes) {
+        message += `\n✅ Token has sufficient OneNote permissions!`;
+      } else {
+        message += `\n❌ **ISSUE FOUND:** Token is missing required scopes!
+
+**Missing Scopes:**
+${missingScopes.map(s => `  • ${s}`).join('\n')}
+
+**To Fix This:**
+1. The Azure AD app (${appId}) needs these API permissions configured:
+   - Microsoft Graph > Notes.Read.All (Delegated)
+   - Microsoft Graph > Notes.ReadWrite.All (Delegated)
+2. Admin consent may be required for .All scopes
+3. After updating permissions, re-run the \`authenticate\` tool to get a new token
+
+**Current Scopes Requested by MCP Server:**
+${scopes.map(s => `  • ${s}`).join('\n')}
+
+The app registration controls which scopes can actually be granted, regardless of what the code requests.`;
+      }
+      
+      return { content: [{ type: 'text', text: message }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: 'text', text: `Failed to decode token: ${error.message}\n\nThis might mean the token format is unexpected or corrupted.` }] };
+    }
+  }
+);
+
 // --- Page Reading Tools ---
 
 server.tool(
@@ -1934,7 +2006,7 @@ async function main() {
     console.error(`   Client ID: ${clientId.substring(0, 8)}... (Using ${process.env.AZURE_CLIENT_ID ? 'environment variable' : 'default'})`);
     console.error('   Ready to manage your OneNote like never before!');
     console.error('--- Available Tool Categories ---');
-    console.error('   🔐 Auth: authenticate, saveAccessToken');
+    console.error('   🔐 Auth: authenticate, saveAccessToken, checkTokenScopes');
     console.error('   📚 Read: listNotebooks, listSections, listPagesInSection, searchPages, searchPagesByDate, searchPageContent, searchInNotebook, getPageContent, getPageByTitle');
     console.error('   📝 Productivity: getMyRecentChanges, createDailyNote');
     console.error('   ✏️ Edit: updatePageContent, appendToPage, updatePageTitle, replaceTextInPage, addNoteToPage, addTableToPage');
