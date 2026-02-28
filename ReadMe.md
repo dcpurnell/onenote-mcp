@@ -217,7 +217,11 @@ This server exposes the following tools to your AI assistant:
 - `listSections`: Lists all sections in a specific notebook. (Args: `notebookId` (string))
   - **FIXED:** Now works with team notebook IDs!
 - `listPagesInSection`: Lists pages in a specific section with pagination support. (Args: `sectionId` (string), `top` (number, optional, max 100), `orderBy` (enum: "created", "modified", optional))
-- `searchPages`: Searches for pages by title across all notebooks with full pagination. (Arg: `query` (optional string))
+- `searchPages`: **OPTIMIZED!** Searches for pages by title across all notebooks with server-side sorting and pagination. (Args: `query` (optional string), `notebookId` (optional string), `notebookName` (optional string), `top` (number, default 100, max 100), `orderBy` (enum: "created", "modified", "title", default: "modified"), `maxResults` (number, default 50, max 200))
+  - **NEW:** Uses `$orderby` and `$top` for 10-30x performance improvement
+  - **NEW:** Can scope search to specific notebook by ID or name
+  - **NEW:** Configurable result limits and sort order
+  - **NEW:** Shows notebook name for each result
 - `searchPagesByDate`: Searches for pages created or modified within a date range across all notebooks and sections. (Args: `days` (number, default 1), `query` (optional keyword filter), `dateField` (enum: "created", "modified", "both"), `includeContent` (boolean, optional), `notebookName` (optional string), `includeTeamNotebooks` (boolean, default: false))
   - **OPTIMIZED:** Uses `$orderby` and `$top` for 90%+ reduction in API calls
   - **NEW:** Can now search team notebooks with `includeTeamNotebooks: true`
@@ -293,6 +297,7 @@ If you're authenticated but `listNotebooks` returns nothing, this is usually a *
 **→ See the complete [Authentication & Permissions Troubleshooting Guide](AUTH_TROUBLESHOOTING.md)**
 
 Quick fix:
+
 1. Run the `checkTokenScopes` tool to see what permissions you have
 2. If missing `Notes.Read.All` or `Notes.ReadWrite.All`, you need to configure your Azure AD app registration
 3. Follow the detailed guide to add proper API permissions

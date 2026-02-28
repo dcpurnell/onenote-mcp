@@ -865,46 +865,127 @@ server.tool(
 server.tool(
   'searchPages',
   {
-    query: z.string().describe('The search term for page titles.').optional()
+    query: z.string().describe('Search term for page titles.').optional(),
+    notebookId: z.string().describe('Optional: limit search to specific notebook ID.').optional(),
+    notebookName: z.string().describe('Optional: limit search to notebook by name (case-insensitive partial match).').optional(),
+    top: z.number().min(1).max(100).default(100).describe('Max pages per section to fetch (default: 100, max: 100).').optional(),
+    orderBy: z.enum(['created', 'modified', 'title']).default('modified').describe('Sort order: "created", "modified" (default), or "title".').optional(),
+    maxResults: z.number().min(1).max(200).default(50).describe('Max total results to return (default: 50).').optional()
   },
-  async ({ query }) => {
+  async ({ query, notebookId, notebookName, top = 100, orderBy = 'modified', maxResults = 50 }) => {
     try {
       await ensureGraphClient();
-      console.error('Searching pages across all sections...');
+      console.error(`Searching pages (top: ${top}, orderBy: ${orderBy})...`);
       
-      // Get all notebooks
-      const notebooksResponse = await graphClient.api('/me/onenote/notebooks').get();
-      const notebooks = notebooksResponse.value || [];
+      // Determine notebooks to search
+      let notebooks = [];
+      if (notebookId) {
+        // Search specific notebook by ID
+        try {
+          const nb = await graphClient.api(`/me/onenote/notebooks/${notebookId}`).get();
+          notebooks = [nb];
+        } catch (error) {
+          return { isError: true, content: [{ type: 'text', text: `Notebook ID "${notebookId}" not found. Use listNotebooks to get valid IDs.` }] };
+        }
+      } else if (notebookName) {
+        // Search by name (partial match, case-insensitive)
+        const allNotebooks = await graphClient.api('/me/onenote/notebooks').get();
+        const searchName = notebookName.toLowerCase();
+        notebooks = (allNotebooks.value || []).filter(nb => {
+          const name = (nb.displayName || nb.name || '').toLowerCase();
+          return name.includes(searchName);
+        });
+        
+        if (notebooks.length === 0) {
+          return { content: [{ type: 'text', text: `🔍 No notebooks found matching "${notebookName}".` }] };
+        }
+        console.error(`Found ${notebooks.length} notebook(s) matching "${notebookName}"`);
+      } else {
+        // Search all notebooks
+        const notebooksResponse = await graphClient.api('/me/onenote/notebooks').get();
+        notebooks = notebooksResponse.value || [];
+      }
       
       if (notebooks.length === 0) {
         return { content: [{ type: 'text', text: '📚 No notebooks found.' }] };
       }
       
+      // Map orderBy to API field
+      const orderByField = orderBy === 'created' ? 'createdDateTime' : orderBy === 'modified' ? 'lastModifiedDateTime' : 'title';
+      
       let allPages = [];
-      // Iterate through notebooks and query sections in parallel
+      let sectionsSearched = 0;
+      
+      // Iterate through notebooks and query sections with optimization
       for (const notebook of notebooks) {
         const sections = await paginateGraphRequest(`/me/onenote/notebooks/${notebook.id}/sections`);
+        sectionsSearched += sections.length;
         
         const pages = await queryAllSectionsParallel(sections, async (section) => {
-          return await paginateGraphRequest(`/me/onenote/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links`);
+          // Use $orderby and $top for server-side optimization
+          const apiPath = `/me/onenote/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=${top}&$orderby=${orderByField} desc`;
+          return await paginateGraphRequest(apiPath);
+        });
+        
+        // Add notebook name to each page for display
+        pages.forEach(page => {
+          page._notebook = notebook.displayName || notebook.name;
         });
         
         allPages = allPages.concat(pages);
       }
       
+      console.error(`Fetched ${allPages.length} pages from ${sectionsSearched} sections`);
+      
+      // Filter by query if provided
       let filteredPages = allPages;
       if (query) {
         const searchTerm = query.toLowerCase();
         filteredPages = allPages.filter(page => page.title && page.title.toLowerCase().includes(searchTerm));
+        console.error(`Filtered to ${filteredPages.length} pages matching "${query}"`);
       }
       
+      // Sort by the requested field (already sorted per section, but may need global sort)
+      filteredPages.sort((a, b) => {
+        if (orderBy === 'created') {
+          return new Date(b.createdDateTime) - new Date(a.createdDateTime);
+        } else if (orderBy === 'modified') {
+          return new Date(b.lastModifiedDateTime) - new Date(a.lastModifiedDateTime);
+        } else { // title
+          return (a.title || '').localeCompare(b.title || '');
+        }
+      });
+      
+      // Limit to maxResults
+      const displayPages = filteredPages.slice(0, maxResults);
+      
       if (filteredPages.length > 0) {
-        const pageList = filteredPages.slice(0, 10).map((page, i) => formatPageInfo(page, i)).join('\n\n');
-        const morePages = filteredPages.length > 10 ? `\n\n... and ${filteredPages.length - 10} more pages.` : '';
-        const tip = filteredPages.length > 100 ? '\n\n💡 Tip: Use `searchPagesByDate` or `searchInNotebook` for more efficient filtered searches.' : '';
-        return { content: [{ type: 'text', text: `🔍 **Search Results** ${query ? `for "${query}"` : ''} (${filteredPages.length} found):\n\n${pageList}${morePages}${tip}` }] };
+        const pageList = displayPages.map((page, i) => {
+          const webUrl = page.links?.oneNoteWebUrl?.href || '';
+          const created = new Date(page.createdDateTime).toLocaleString();
+          const modified = new Date(page.lastModifiedDateTime).toLocaleString();
+          
+          return `${i + 1}. **${page.title}**
+   📚 Notebook: ${page._notebook}
+   🔗 <${webUrl}>
+   📅 Created: ${created}
+   🔄 Modified: ${modified}`;
+        }).join('\n\n');
+        
+        const morePages = filteredPages.length > maxResults ? `\n\n... and ${filteredPages.length - maxResults} more pages. Use 'maxResults' parameter to see more.` : '';
+        const scopeInfo = notebookName ? ` in notebooks matching "${notebookName}"` : notebookId ? ` in notebook` : ` (${notebooks.length} notebook${notebooks.length > 1 ? 's' : ''})`;
+        const queryInfo = query ? ` for "${query}"` : '';
+        const perfInfo = `\n\n⚡ Performance: Fetched top ${top} pages per section, sorted by ${orderBy}`;
+        
+        return { 
+          content: [{ 
+            type: 'text', 
+            text: `🔍 **Search Results**${queryInfo}${scopeInfo}\nFound ${filteredPages.length} page${filteredPages.length !== 1 ? 's' : ''}, showing ${displayPages.length}:\n\n${pageList}${morePages}${perfInfo}` 
+          }] 
+        };
       } else {
-        return { content: [{ type: 'text', text: query ? `🔍 No pages found matching "${query}".` : '📄 No pages found.' }] };
+        const scopeInfo = notebookName ? ` in notebooks matching "${notebookName}"` : notebookId ? ` in that notebook` : '';
+        return { content: [{ type: 'text', text: query ? `🔍 No pages found matching "${query}"${scopeInfo}.` : `📄 No pages found${scopeInfo}.` }] };
       }
     } catch (error) {
       return { isError: true, content: [{ type: 'text', text: `Failed to search pages: ${error.message}` }] };
