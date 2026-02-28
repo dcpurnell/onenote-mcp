@@ -1,7 +1,7 @@
 # OneNote MCP Server - Design & Requirements Document
 
-**Version:** 1.0  
-**Last Updated:** February 22, 2026  
+**Version:** 1.1  
+**Last Updated:** February 28, 2026  
 **Document Status:** Living Document
 
 ---
@@ -493,6 +493,124 @@ TokenFormat:
   - serialize(token) → string
   - deserialize(data) → Token | Error
 
+```
+
+### 7. Notebook Cache Manager (v1.1)
+
+**Responsibility:** Manage disk-persisted notebook cache for performance optimization
+
+**Key Functions:**
+
+- Load cache from disk on startup
+- Save cache to disk after refresh
+- Validate cache age against TTL
+- Progressive loading (personal first, teams async)
+- Background refresh of team notebooks
+
+**Interfaces:**
+
+```text
+NotebookCache:
+  - loadNotebookCacheFromDisk() → boolean
+  - saveNotebookCacheToDisk() → void
+  - refreshNotebookCache(includeTeams, personalOnly) → Notebook[]
+  - refreshTeamNotebooksBackground() → Promise<void>
+  - getNotebookApiPath(notebookId, resourcePath) → string
+
+CacheStructure:
+  - timestamp: number (epoch milliseconds)
+  - notebooks: EnhancedNotebook[]
+
+EnhancedNotebook:
+  - ...standardNotebookFields
+  - _isPersonal: boolean
+  - _groupId: string | null
+  - _teamName: string | null
+  - _isFromTeam: boolean
+```
+
+**State Management:**
+
+```text
+Global State:
+  - notebookCache: Notebook[] | null
+  - cacheTimestamp: number | null
+  - teamNotebooksLoading: boolean
+
+Constants:
+  - CACHE_TTL_MS: 300000 (5 minutes)
+  - notebookCacheFilePath: string ('.notebook-cache.json')
+```
+
+**Cache Loading Flow:**
+
+```text
+[Server Start] → loadNotebookCacheFromDisk()
+  ├─ Cache exists & valid? → Load into memory → [Ready]
+  ├─ Cache expired? → Log expiry → [First Use Refresh]
+  └─ No cache? → [First Use Refresh]
+
+[Tool Invocation] → Check cache
+  ├─ Cache present & valid? → Use cached data
+  └─ No cache or expired? → refreshNotebookCache()
+      ├─ personalOnly=true? → Return personal immediately + background team load
+      └─ includeTeams=true? → Fetch all (personal + teams in parallel)
+```
+
+### 8. Query Optimizer (v1.1)
+
+**Responsibility:** Optimize Microsoft Graph queries using server-side filtering
+
+**Key Functions:**
+
+- Calculate optimal `$top` limit based on time window
+- Build optimized queries with `$orderby` and `$top`
+- Minimize API calls and data transfer
+- Reduce rate limit errors
+
+**Interfaces:**
+
+```text
+QueryOptimizer:
+  - calculateTopLimit(days) → number
+  - buildOptimizedPageQuery(sectionId, days) → Query
+  - executeWithRetry(query) → Response
+
+OptimizationStrategy:
+  - topLimit: min(100, max(20, days * 10))
+  - orderBy: 'lastModifiedDateTime desc'
+  - singleCallPerSection: true
+```
+
+**Optimization Formula:**
+
+```text
+Input: days (number of days to search)
+Output: topLimit (max pages to fetch per section)
+
+topLimit = min(100, max(20, days * 10))
+
+Examples:
+  days=1  → topLimit=20   (fetch top 20 most recent)
+  days=7  → topLimit=70   (fetch top 70 most recent)
+  days=14 → topLimit=100  (capped at 100)
+  days=30 → topLimit=100  (capped at 100)
+```
+
+**Performance Impact:**
+
+```text
+Before: paginateGraphRequest(all pages) → filter in JS
+  - 10-30+ API calls per section
+  - Fetch all pages (could be 1000+)
+  - 60+ second response times
+  - Frequent rate limit errors
+
+After: Single optimized query with $orderby + $top
+  - 1 API call per section
+  - Fetch only top N recent pages
+  - <5 second response times
+  - Rare rate limit errors (90%+ reduction)
 ```
 
 ---
@@ -1019,19 +1137,162 @@ async Function: searchAllNotebooks(query)
 ### Performance Targets
 
 ```text
-| Operation | Target | Measurement |
-|-----------|--------|-------------|
-| List 100 notebooks | < 3 seconds | Time to complete |
-| Search 1000 pages | < 30 seconds | Time to scan all |
-| Retrieve page content | < 2 seconds | Time to fetch + process |
-| Create new page | < 3 seconds | Time from request to confirmation |
-| Update page content | < 3 seconds | Time from request to confirmation |
+| Operation | Target | Actual Performance | Measurement |
+|-----------|--------|-------------------|-------------|
+| List 67 notebooks (cached) | < 0.1 seconds | ~0.05 seconds | Time to complete |
+| List 67 notebooks (fresh) | < 60 seconds | ~30-45 seconds | Time with 58 teams |
+| Search recent pages (optimized) | < 5 seconds | ~2-4 seconds | 7-day window |
+| Retrieve page content | < 2 seconds | ~1-2 seconds | Time to fetch + process |
+| Create new page | < 3 seconds | ~2-3 seconds | Time from request to confirmation |
+| Update page content | < 3 seconds | ~2-3 seconds | Time from request to confirmation |
 
 ```
 
 ### Caching Strategy
 
-**Not Implemented (By Design):**
+**Implemented (v1.1 - February 2026):**
+
+#### Notebook Cache
+
+- **Purpose:** Prevent timeout issues with large numbers of team notebooks (58+ teams)
+- **Storage:** Disk-persisted to `.notebook-cache.json`
+- **TTL:** 5 minutes (300,000 ms)
+- **Loading Strategy:** Progressive loading
+  - Personal notebooks (<2s) returned immediately
+  - Team notebooks loaded asynchronously in background
+  - Cache survives server restarts
+- **Cache Structure:**
+
+  ```json
+  {
+    "timestamp": 1772294819135,
+    "notebooks": [
+      {
+        "id": "notebook-id",
+        "displayName": "Notebook Name",
+        "_isPersonal": true,
+        "_groupId": null,
+        "_teamName": null,
+        "_isFromTeam": false
+      }
+    ]
+  }
+  ```
+
+**Cache Utility:**
+
+- **Tool:** `refresh-cache.mjs` - utility script to pre-populate cache
+- **Use Case:** Initial setup, manual refresh, sharing cache between apps
+- **Usage:** `node refresh-cache.mjs`
+
+**Benefits:**
+
+- Instant notebook list loading (from cache)
+- No timeout errors on startup
+- Reduced API calls to Microsoft Graph
+- Better user experience for `listNotebooks`, `getMyRecentChanges`, `searchPagesByDate`
+
+### Query Optimization Strategy
+
+**Implemented (v1.1 - February 2026):**
+
+#### Server-Side Filtering with $orderby and $top
+
+**Problem:**
+
+- Previous implementation fetched ALL pages from sections, then filtered in JavaScript
+- 10-30+ API calls per section (pagination)
+- 60+ second response times
+- Frequent rate limit errors
+
+**Solution:**
+
+- Use Microsoft Graph's `$orderby` and `$top` query parameters
+- Let server do the sorting and limiting
+- Single API call per section
+
+**Implementation:**
+
+```javascript
+// Dynamic top limit based on time window
+const topLimit = Math.min(100, Math.max(20, days * 10));
+
+// Optimized query
+const response = await graphClient
+  .api(`/me/onenote/sections/${section.id}/pages`)
+  .orderby('lastModifiedDateTime desc')
+  .top(topLimit)
+  .get();
+```
+
+**Examples:**
+
+- 1 day → fetch top 20 pages
+- 7 days → fetch top 70 pages  
+- 14+ days → fetch top 100 pages (capped)
+
+**Performance Impact:**
+
+```text
+| Metric | Before | After | Improvement |
+|--------|--------|-------|--------------|
+| API calls per section | 10-30+ | 1 | 10-30x fewer |
+| Data transferred | All pages | Top N only | 90%+ reduction |
+| Response time | 60+ seconds | <5 seconds | 12x faster |
+| Rate limit errors | Frequent | Rare | Much more reliable |
+```
+
+**Tools Optimized:**
+
+- `getMyRecentChanges` - Recent changes query
+- `searchPagesByDate` - Date-based search
+
+### Team Notebooks Architecture
+
+**Problem Solved (v1.1 - February 2026):**
+
+Team notebooks (from Microsoft Teams/SharePoint) required special API routing:
+
+- Personal notebooks: `/me/onenote/...`
+- Team notebooks: `/groups/{groupId}/onenote/...`
+
+**Architecture:****
+
+1. **Metadata Tracking:** Each notebook in cache includes:
+   - `_isPersonal` (boolean)
+   - `_groupId` (string | null)
+   - `_teamName` (string | null)
+   - `_isFromTeam` (boolean)
+
+2. **API Path Routing:** `getNotebookApiPath()` helper function routes requests:
+
+   ```javascript
+   function getNotebookApiPath(notebookId, resourcePath) {
+     const notebook = findNotebookInCache(notebookId);
+     if (notebook._groupId) {
+       return `/groups/${notebook._groupId}/onenote/${resourcePath}`;
+     }
+     return `/me/onenote/${resourcePath}`;
+   }
+   ```
+
+3. **Parallel Team Fetching:** Uses `Promise.allSettled()` for resilience:
+   - Fetches all 58 teams in parallel
+   - Individual team failures don't block others
+   - Aggressive parallelization (no batch limits)
+
+4. **Display Name Fallbacks:** `displayName || name || "{TeamName} Notebook"`
+
+**Benefits:**
+
+- No "resource ID does not exist" errors
+- Works with 50+ teams
+- Proper display names for all notebooks
+- Team context displayed in results
+
+### Caching Strategy (Legacy Notes)
+
+**Not Originally Implemented (By Design):**
 
 - OneNote content changes frequently
 

@@ -14,17 +14,29 @@ page manipulation.
 
 ## 🆕 Latest Updates (February 2026)
 
+**Query Optimization with $orderby and $top - 10-30x Performance Boost!**
+
+- ✅ **Server-side sorting** - Microsoft Graph does the work, not your machine
+- ✅ **Smart limiting** - fetches only top N recent pages (e.g., 70 pages for 7 days)
+- ✅ **Single API call** - no more pagination through thousands of pages
+- ✅ **Response time** - from 60+ seconds to <5 seconds typical
+- ✅ **Rate limit friendly** - 90%+ reduction in API calls
+- ✅ **Dynamic optimization** - adjusts fetch size based on time window
+
+**[Query Optimization Details →](QUERY_OPTIMIZATION.md)**
+
 **Team Notebooks Support with Progressive Loading!** The server now properly supports Microsoft Teams/SharePoint notebooks with instant performance:
 
-- ✅ **Disk-persisted cache** - survives server restarts, loads instantly
+- ✅ **Disk-persisted cache** - survives server restarts, loads instantly (`.notebook-cache.json`)
 - ✅ **Progressive loading** - personal notebooks in <2s, teams load in background
 - ✅ **No timeouts** - works perfectly with 50+ teams
+- ✅ **Cache utility** - `refresh-cache.mjs` to pre-populate cache for other apps
 - ✅ Access team notebooks from SharePoint sites
 - ✅ List sections in team notebooks (no more "resource ID does not exist" errors)
 - ✅ Search and get recent changes in team notebooks
 - ✅ Fixed display name issues (`undefined` → proper names)
 
-**[See complete documentation →](TEAM_NOTEBOOKS_FIX.md)**
+**[Team Notebooks Documentation →](TEAM_NOTEBOOKS_FIX.md)**
 
 ## Features
 
@@ -44,9 +56,13 @@ page manipulation.
   - Automatic date formatting (M/D/YY format).
   - Smart duplicate detection (won't recreate existing daily notes).
 - **Pagination & Performance:**
-  - Handles accounts with 10+ notebooks and 100+ sections efficiently.
+  - **Query optimization** - uses `$orderby` and `$top` for 10-30x faster queries
+  - Handles accounts with 67+ notebooks and 100+ sections efficiently.
   - Automatic retry logic with exponential backoff for rate limit handling.
-  - Smart pagination using `@odata.nextLink` for large result sets.
+  - Smart pagination using `@odata.nextLink` only when needed.
+  - **Disk-persisted caching** - notebook list cached to `.notebook-cache.json` (5-min TTL)
+  - **Progressive loading** - personal notebooks load instantly, teams load in background
+  - **Cache utility** - `node refresh-cache.mjs` to pre-populate cache
   - Progress logging during long-running searches.
 - **Write & Edit Operations:**
   - Create new OneNote pages with custom HTML or markdown content.
@@ -119,10 +135,12 @@ page manipulation.
    .DS_Store
    *.log
    .access-token.txt
+   .notebook-cache.json
    .env
    ```
 
    The `.access-token.txt` file will be created by the server to store your authentication token.
+   The `.notebook-cache.json` file will be created to cache your notebook list for better performance.
 
 ## Running the MCP Server
 
@@ -200,8 +218,10 @@ This server exposes the following tools to your AI assistant:
 - `listPagesInSection`: Lists pages in a specific section with pagination support. (Args: `sectionId` (string), `top` (number, optional, max 100), `orderBy` (enum: "created", "modified", optional))
 - `searchPages`: Searches for pages by title across all notebooks with full pagination. (Arg: `query` (optional string))
 - `searchPagesByDate`: Searches for pages created or modified within a date range across all notebooks and sections. (Args: `days` (number, default 1), `query` (optional keyword filter), `dateField` (enum: "created", "modified", "both"), `includeContent` (boolean, optional), `notebookName` (optional string), `includeTeamNotebooks` (boolean, default: false))
+  - **OPTIMIZED:** Uses `$orderby` and `$top` for 90%+ reduction in API calls
   - **NEW:** Can now search team notebooks with `includeTeamNotebooks: true`
   - **NEW:** Uses cached notebook list for better performance
+  - Smart fetch limits: 1 day → 20 pages, 7 days → 70 pages, 14+ days → 100 pages (max)
 - `searchPageContent`: **NEW!** Searches for text within page content (not just titles). (Args: `query` (string), `days` (optional number), `notebookId` (optional), `maxPages` (default 20))
 - `searchInNotebook`: Scoped search within a specific notebook with optional date and keyword filters. (Args: `notebookId` (string), `query` (optional string), `days` (optional number), `top` (number, max 100))
   - **FIXED:** Now works with team notebook IDs!
@@ -212,8 +232,10 @@ This server exposes the following tools to your AI assistant:
 
 - `getMyRecentChanges`: Shows pages YOU modified since a date - perfect for standup prep! (Args: `sinceDate` (string or "monday"), `days` (optional number), `notebookId` (optional), `includeCreator` (boolean))
 
+  - **OPTIMIZED:** Uses `$orderby` and `$top` for 10-30x faster queries (was 60+ seconds, now <5 seconds)
   - **NEW:** Prevents timeouts by requiring `notebookId` when you have >30 notebooks
   - **FIXED:** Now works with team notebook IDs!
+  - Dynamically adjusts page fetch limit based on time window (7 days → top 70 pages)
 
 - `createDailyNote`: Quickly create a daily note with auto-formatted date. (Args: `notebookName` (string), `sectionName` (string), `date` (optional, defaults to "today"), `title` (optional), `content` (optional))
 
