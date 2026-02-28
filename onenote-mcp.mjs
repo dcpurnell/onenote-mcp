@@ -21,6 +21,8 @@ const scopes = ['Notes.Read', 'Notes.ReadWrite', 'Notes.Read.All', 'Notes.ReadWr
 // --- Global State ---
 let accessToken = null;
 let graphClient = null;
+let notebookCache = null; // Cache of notebooks with group info
+let cacheTimestamp = null; // When cache was last updated
 
 // --- MCP Server Initialization ---
 const server = new McpServer({
@@ -314,14 +316,15 @@ async function fetchPageContentAdvanced(pageId, method = 'httpDirect') {
 }
 
 /**
- * Formats OneNote page information for display.
- * @param {object} page - The OneNote page object from Graph API.
+ * Formats OneNote page/notebook information for display.
+ * @param {object} page - The OneNote page/notebook object from Graph API.
  * @param {number | null} [index=null] - Optional index for numbered lists.
  * @param {boolean} [includeCreator=false] - Include creator/modifier information.
  * @returns {string} Formatted page information string.
  */
 function formatPageInfo(page, index = null, includeCreator = false) {
   const prefix = index !== null ? `${index + 1}. ` : '';
+  const title = page.title || page.displayName || 'Untitled';
   const webUrl = page.links?.oneNoteWebUrl?.href || '';
   const urlLine = webUrl ? `
    🔗 <${webUrl}>` : '';
@@ -336,10 +339,127 @@ function formatPageInfo(page, index = null, includeCreator = false) {
    Modified by: ${page.lastModifiedBy.user.displayName}`;
   }
   
-  return `${prefix}**${page.title}**
+  // Show team context if present
+  const teamLine = page._teamName ? `
+   Team: ${page._teamName}` : '';
+  
+  return `${prefix}**${title}**
    ID: ${page.id}
    Created: ${new Date(page.createdDateTime).toLocaleDateString()}
-   Modified: ${new Date(page.lastModifiedDateTime).toLocaleDateString()}${creatorLine}${urlLine}`;
+   Modified: ${new Date(page.lastModifiedDateTime).toLocaleDateString()}${creatorLine}${teamLine}${urlLine}`;
+}
+
+/**
+ * Gets the correct API path for accessing notebook resources.
+ * @param {string} notebookId - The notebook ID.
+ * @param {string} resourcePath - The resource path (e.g., 'sections', 'pages').
+ * @returns {Promise<string>} The correct API path.
+ */
+async function getNotebookApiPath(notebookId, resourcePath) {
+  // Check cache first
+  if (notebookCache) {
+    const notebook = notebookCache.find(nb => nb.id === notebookId);
+    if (notebook) {
+      if (notebook._groupId) {
+        return `/groups/${notebook._groupId}/onenote/notebooks/${notebookId}/${resourcePath}`;
+      }
+      return `/me/onenote/notebooks/${notebookId}/${resourcePath}`;
+    }
+  }
+  
+  // Try personal notebook path first
+  try {
+    await ensureGraphClient();
+    await graphClient.api(`/me/onenote/notebooks/${notebookId}`).get();
+    return `/me/onenote/notebooks/${notebookId}/${resourcePath}`;
+  } catch (error) {
+    // If that fails, search in team notebooks
+    if (!notebookCache) {
+      await refreshNotebookCache();
+    }
+    const notebook = notebookCache?.find(nb => nb.id === notebookId);
+    if (notebook && notebook._groupId) {
+      return `/groups/${notebook._groupId}/onenote/notebooks/${notebookId}/${resourcePath}`;
+    }
+    throw new Error(`Notebook ${notebookId} not found in personal or team notebooks. Error: ${error.message}`);
+  }
+}
+
+/**
+ * Refreshes the notebook cache with both personal and team notebooks.
+ * @param {boolean} includeTeams - Whether to include team notebooks.
+ * @returns {Promise<Array>} Array of all notebooks with group info.
+ */
+async function refreshNotebookCache(includeTeams = true) {
+  await ensureGraphClient();
+  let allNotebooks = [];
+  
+  // Get personal notebooks
+  try {
+    const ownedResponse = await graphClient.api('/me/onenote/notebooks').get();
+    allNotebooks = (ownedResponse.value || []).map(nb => ({
+      ...nb,
+      _isPersonal: true,
+      _groupId: null,
+      _teamName: null
+    }));
+  } catch (error) {
+    console.error(`Error fetching personal notebooks: ${error.message}`);
+  }
+  
+  // Get team notebooks if requested
+  if (includeTeams) {
+    try {
+      const groupsResponse = await graphClient
+        .api('/me/joinedTeams')
+        .select('id,displayName')
+        .get();
+      
+      const teams = groupsResponse.value || [];
+      const batchSize = 10;
+      
+      for (let i = 0; i < teams.length; i += batchSize) {
+        const batch = teams.slice(i, i + batchSize);
+        const promises = batch.map(async (team) => {
+          try {
+            const teamNotebooks = await graphClient
+              .api(`/groups/${team.id}/onenote/notebooks`)
+              .get();
+            
+            if (teamNotebooks.value && teamNotebooks.value.length > 0) {
+              return teamNotebooks.value.map(nb => ({
+                ...nb,
+                displayName: nb.displayName || nb.name || `${team.displayName} Notebook`,
+                _isPersonal: false,
+                _groupId: team.id,
+                _teamName: team.displayName,
+                _isFromTeam: true
+              }));
+            }
+            return [];
+          } catch (teamError) {
+            console.error(`Error fetching notebooks for team ${team.displayName}: ${teamError.message}`);
+            return [];
+          }
+        });
+        
+        const results = await Promise.all(promises);
+        results.forEach(notebooks => {
+          if (notebooks.length > 0) {
+            allNotebooks.push(...notebooks);
+          }
+        });
+      }
+    } catch (teamsError) {
+      console.error(`Error getting team notebooks: ${teamsError.message}`);
+    }
+  }
+  
+  notebookCache = allNotebooks;
+  cacheTimestamp = Date.now();
+  console.error(`Notebook cache refreshed: ${allNotebooks.length} notebooks (${allNotebooks.filter(nb => nb._isPersonal).length} personal, ${allNotebooks.filter(nb => !nb._isPersonal).length} team)`);
+  
+  return allNotebooks;
 }
 
 // ============================================================================
@@ -445,68 +565,31 @@ Token loaded and verified.
 server.tool(
   'listNotebooks',
   {
-    includeTeamNotebooks: z.boolean().default(false).describe('Include notebooks from Microsoft Teams you have joined. Does not include personally shared notebooks from OneDrive (Microsoft API limitation).').optional()
+    includeTeamNotebooks: z.boolean().default(false).describe('Include notebooks from Microsoft Teams you have joined. Does not include personally shared notebooks from OneDrive (Microsoft API limitation).').optional(),
+    refresh: z.boolean().default(false).describe('Force refresh of notebook cache.').optional()
   },
-  async ({ includeTeamNotebooks = false }) => {
+  async ({ includeTeamNotebooks = false, refresh = false }) => {
     try {
       await ensureGraphClient();
       
-      let allNotebooks = [];
+      // Use cache if available and not expired (5 minutes)
+      const cacheExpired = !cacheTimestamp || (Date.now() - cacheTimestamp > 5 * 60 * 1000);
       
-      // Always get user's owned notebooks
-      const ownedResponse = await graphClient.api('/me/onenote/notebooks').get();
-      allNotebooks = ownedResponse.value || [];
+      if (refresh || cacheExpired || !notebookCache) {
+        await refreshNotebookCache(includeTeamNotebooks);
+      }
       
-      if (includeTeamNotebooks) {
-        // Get notebooks from joined teams/groups
-        try {
-          const groupsResponse = await graphClient
-            .api('/me/joinedTeams')
-            .select('id,displayName')
-            .get();
-          
-          // Process teams in parallel batches of 10 for better performance
-          const teams = groupsResponse.value || [];
-          const batchSize = 10;
-          
-          for (let i = 0; i < teams.length; i += batchSize) {
-            const batch = teams.slice(i, i + batchSize);
-            const promises = batch.map(async (team) => {
-              try {
-                const teamNotebooks = await graphClient
-                  .api(`/groups/${team.id}/onenote/notebooks`)
-                  .get();
-                
-                if (teamNotebooks.value && teamNotebooks.value.length > 0) {
-                  // Add notebooks with team context
-                  return teamNotebooks.value.map(nb => ({
-                    ...nb,
-                    _teamName: team.displayName,
-                    _isFromTeam: true
-                  }));
-                }
-                return [];
-              } catch (teamError) {
-                // Silently skip teams without notebooks or insufficient permissions
-                return [];
-              }
-            });
-            
-            const results = await Promise.all(promises);
-            results.forEach(notebooks => {
-              if (notebooks.length > 0) {
-                allNotebooks.push(...notebooks);
-              }
-            });
-          }
-        } catch (teamsError) {
-          console.error(`Error getting team notebooks: ${teamsError.message}`);
-        }
+      let allNotebooks = notebookCache || [];
+      
+      // Filter by team notebooks preference if cache includes both
+      if (!includeTeamNotebooks) {
+        allNotebooks = allNotebooks.filter(nb => nb._isPersonal);
       }
       
       if (allNotebooks.length > 0) {
         const notebookList = allNotebooks.map((nb, i) => formatPageInfo(nb, i)).join('\n\n');
-        return { content: [{ type: 'text', text: `📚 **Your OneNote Notebooks** (${allNotebooks.length} found):\n\n${notebookList}` }] };
+        const cacheInfo = refresh ? '' : '\n\n💡 Use `refresh: true` to update the notebook list.';
+        return { content: [{ type: 'text', text: `📚 **Your OneNote Notebooks** (${allNotebooks.length} found):\n\n${notebookList}${cacheInfo}` }] };
       } else {
         return { content: [{ type: 'text', text: '📚 No OneNote notebooks found.' }] };
       }
@@ -525,7 +608,10 @@ server.tool(
     try {
       await ensureGraphClient();
       console.error(`Fetching sections for notebook ID: ${notebookId}`);
-      const sections = await paginateGraphRequest(`/me/onenote/notebooks/${notebookId}/sections`);
+      
+      // Get correct API path for this notebook (personal or team)
+      const apiPath = await getNotebookApiPath(notebookId, 'sections');
+      const sections = await paginateGraphRequest(apiPath);
       
       if (sections.length > 0) {
         const sectionList = sections.map((section, i) => `${i + 1}. **${section.displayName}**\n   ID: ${section.id}\n   Created: ${new Date(section.createdDateTime).toLocaleDateString()}`).join('\n\n');
@@ -625,18 +711,26 @@ server.tool(
     query: z.string().describe('Optional keyword to filter page titles.').optional(),
     dateField: z.enum(['created', 'modified', 'both']).default('both').describe('Filter by created, modified, or both dates.').optional(),
     includeContent: z.boolean().default(false).describe('Include page content preview (slower).').optional(),
-    notebookName: z.string().describe('Optional: limit search to specific notebook name.').optional()
+    notebookName: z.string().describe('Optional: limit search to specific notebook name.').optional(),
+    includeTeamNotebooks: z.boolean().default(false).describe('Include team notebooks in search.').optional()
   },
-  async ({ days, query, dateField, includeContent, notebookName }) => {
+  async ({ days, query, dateField, includeContent, notebookName, includeTeamNotebooks }) => {
     try {
       await ensureGraphClient();
       const threshold = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
       threshold.setHours(0, 0, 0, 0); // Start at midnight
       console.error(`Searching pages from last ${days} day(s) (since ${threshold.toLocaleString()})...`);
       
-      // Get all notebooks (or filter by name)
-      const notebooksResponse = await graphClient.api('/me/onenote/notebooks').get();
-      let notebooks = notebooksResponse.value || [];
+      // Get all notebooks from cache (or refresh)
+      if (!notebookCache) {
+        await refreshNotebookCache(includeTeamNotebooks);
+      }
+      let notebooks = notebookCache || [];
+      
+      // Filter by personal/team preference
+      if (!includeTeamNotebooks) {
+        notebooks = notebooks.filter(nb => nb._isPersonal);
+      }
       
       // Filter by notebook name if specified
       if (notebookName) {
@@ -646,7 +740,7 @@ server.tool(
         );
         
         if (notebooks.length === 0) {
-          return { content: [{ type: 'text', text: `📚 No notebook found matching "${notebookName}".` }] };
+          return { content: [{ type: 'text', text: `📚 No notebook found matching "${notebookName}". ${!includeTeamNotebooks ? 'Try setting includeTeamNotebooks: true to search team notebooks.' : ''}` }] };
         }
       }
       
@@ -660,7 +754,19 @@ server.tool(
       
       // Iterate through notebooks and query sections in parallel
       for (const notebook of notebooks) {
-        const sections = await paginateGraphRequest(`/me/onenote/notebooks/${notebook.id}/sections`);
+        // Get correct API path for this notebook (personal or team)
+        const sectionsPath = notebook._groupId 
+          ? `/groups/${notebook._groupId}/onenote/notebooks/${notebook.id}/sections`
+          : `/me/onenote/notebooks/${notebook.id}/sections`;
+        
+        let sections = [];
+        try {
+          sections = await paginateGraphRequest(sectionsPath);
+        } catch (error) {
+          console.error(`Error fetching sections for notebook ${notebook.displayName}: ${error.message}`);
+          continue; // Skip this notebook
+        }
+        
         totalSectionsChecked += sections.length;
         
         // Query all sections in parallel
@@ -696,15 +802,15 @@ server.tool(
           
           // Add notebook and section context
           matchingPages.forEach(page => {
-            page._notebook = notebook.displayName || notebook.name;
-            page._section = section.displayName || section.name;
+            page._notebook = notebook.displayName || notebook.name || 'Untitled';
+            page._section = section.displayName || section.name || 'Untitled';
           });
           
           return matchingPages;
         });
         
         allMatchingPages = allMatchingPages.concat(pages);
-        console.error(`Checked notebook "${notebook.displayName}", ${allMatchingPages.length} matches so far...`);
+        console.error(`Checked notebook "${notebook.displayName || notebook.name}", ${allMatchingPages.length} matches so far...`);
       }
       
       console.error(`Search complete: ${allMatchingPages.length} matches from ${totalSectionsChecked} sections`);
@@ -914,17 +1020,55 @@ server.tool(
       // Get notebooks
       let notebooks = [];
       if (notebookId) {
-        const nb = await graphClient.api(`/me/onenote/notebooks/${notebookId}`).get();
-        notebooks = [nb];
+        // Get specific notebook from cache or API
+        if (!notebookCache) {
+          await refreshNotebookCache(true);
+        }
+        const cachedNotebook = notebookCache?.find(nb => nb.id === notebookId);
+        if (cachedNotebook) {
+          notebooks = [cachedNotebook];
+        } else {
+          // Try to fetch it directly
+          try {
+            const nb = await graphClient.api(`/me/onenote/notebooks/${notebookId}`).get();
+            notebooks = [{ ...nb, _isPersonal: true, _groupId: null }];
+          } catch (error) {
+            return { isError: true, content: [{ type: 'text', text: `Notebook ${notebookId} not found. Please use listNotebooks to get valid IDs.` }] };
+          }
+        }
       } else {
-        const response = await graphClient.api('/me/onenote/notebooks').get();
-        notebooks = response.value || [];
+        // Use cached notebooks to avoid timeout
+        if (!notebookCache) {
+          await refreshNotebookCache(true);
+        }
+        notebooks = notebookCache || [];
+        
+        if (notebooks.length > 30) {
+          return { 
+            isError: true, 
+            content: [{ 
+              type: 'text', 
+              text: `⚠️ You have ${notebooks.length} notebooks. Scanning all would take too long.\n\n💡 **Use notebookId parameter:**\n1. Run \`listNotebooks\` to see your notebooks\n2. Call \`getMyRecentChanges\` with a specific \`notebookId\`\n\nExample: getMyRecentChanges(days: 7, notebookId: "your-notebook-id")` 
+            }] 
+          };
+        }
       }
       
       let recentPages = [];
       
       for (const notebook of notebooks) {
-        const sections = await paginateGraphRequest(`/me/onenote/notebooks/${notebook.id}/sections`);
+        // Get correct API path for this notebook (personal or team)
+        const apiPath = notebook._groupId 
+          ? `/groups/${notebook._groupId}/onenote/notebooks/${notebook.id}/sections`
+          : `/me/onenote/notebooks/${notebook.id}/sections`;
+        
+        let sections = [];
+        try {
+          sections = await paginateGraphRequest(apiPath);
+        } catch (error) {
+          console.error(`Error fetching sections for notebook ${notebook.displayName}: ${error.message}`);
+          continue; // Skip this notebook if we can't access it
+        }
         
         // Query all sections in parallel
         const pages = await queryAllSectionsParallel(sections, async (section) => {
@@ -938,8 +1082,9 @@ server.tool(
           
           // Add notebook and section context
           matchingPages.forEach(page => {
-            page._notebook = notebook.displayName || notebook.name;
-            page._section = section.displayName || section.name;
+            page._notebook = notebook.displayName || notebook.name || 'Untitled';
+            page._section = section.displayName || section.name || 'Untitled';
+            page._isFromTeam = notebook._isFromTeam || false;
           });
           
           return matchingPages;
@@ -1097,12 +1242,35 @@ server.tool(
       await ensureGraphClient();
       console.error(`Searching in notebook ID: ${notebookId}`);
       
-      // Get notebook info
-      const notebook = await graphClient.api(`/me/onenote/notebooks/${notebookId}`).get();
-      const sections = await paginateGraphRequest(`/me/onenote/notebooks/${notebookId}/sections`);
+      // Get notebook info and correct API path
+      let notebook = null;
+      let apiPath = null;
+      
+      try {
+        apiPath = await getNotebookApiPath(notebookId, 'sections');
+        // Get notebook from cache
+        if (!notebookCache) {
+          await refreshNotebookCache(true);
+        }
+        notebook = notebookCache?.find(nb => nb.id === notebookId);
+        
+        if (!notebook) {
+          // Try to fetch directly
+          try {
+            notebook = await graphClient.api(`/me/onenote/notebooks/${notebookId}`).get();
+          } catch (e) {
+            // Might be a team notebook
+            return { isError: true, content: [{ type: 'text', text: `Notebook ${notebookId} not found. Please use listNotebooks to get valid IDs.` }] };
+          }
+        }
+      } catch (error) {
+        return { isError: true, content: [{ type: 'text', text: `Failed to access notebook: ${error.message}` }] };
+      }
+      
+      const sections = await paginateGraphRequest(apiPath);
       
       if (sections.length === 0) {
-        return { content: [{ type: 'text', text: `📂 No sections found in notebook "${notebook.displayName}".` }] };
+        return { content: [{ type: 'text', text: `📂 No sections found in notebook "${notebook.displayName || notebook.name}".` }] };
       }
       
       console.error(`Found ${sections.length} section(s), searching pages...`);

@@ -12,6 +12,17 @@ This server provides a rich set of tools for advanced OneNote management,
 including robust text extraction, HTML content processing, and fine-grained
 page manipulation.
 
+## 🆕 Latest Updates (February 2026)
+
+**Team Notebooks Support Fixed!** The server now properly supports Microsoft Teams/SharePoint notebooks:
+- ✅ Access team notebooks from SharePoint sites
+- ✅ List sections in team notebooks (no more "resource ID does not exist" errors)
+- ✅ Search and get recent changes in team notebooks
+- ✅ Smart caching prevents timeouts with 67+ notebooks
+- ✅ Fixed display name issues (`undefined` → proper names)
+
+**[See complete documentation →](TEAM_NOTEBOOKS_FIX.md)**
+
 ## Features
 
 - **Authentication:** Secure device code flow for Microsoft Graph API access.
@@ -177,18 +188,27 @@ This server exposes the following tools to your AI assistant:
 
 **Reading OneNote Data:**
 
-- `listNotebooks`: Lists all your OneNote notebooks. (Args: `includeTeamNotebooks` (boolean, optional, default: false - when true, includes notebooks from Microsoft Teams you're a member of. **Requires Notes.Read.All or Notes.ReadWrite.All permissions.** Does not include personally shared notebooks from OneDrive due to Microsoft API limitations.))
+- `listNotebooks`: Lists all your OneNote notebooks. (Args: `includeTeamNotebooks` (boolean, optional, default: false - when true, includes notebooks from Microsoft Teams you're a member of. **Requires Notes.Read.All or Notes.ReadWrite.All permissions.**), `refresh` (boolean, optional - forces cache refresh))
+  - Note: Does not include personally shared notebooks from OneDrive due to Microsoft API limitations.
+  - **NEW:** Results are cached for 5 minutes for better performance
+  - **NEW:** Team notebooks show which team they belong to
 - `listSections`: Lists all sections in a specific notebook. (Args: `notebookId` (string))
+  - **FIXED:** Now works with team notebook IDs!
 - `listPagesInSection`: Lists pages in a specific section with pagination support. (Args: `sectionId` (string), `top` (number, optional, max 100), `orderBy` (enum: "created", "modified", optional))
 - `searchPages`: Searches for pages by title across all notebooks with full pagination. (Arg: `query` (optional string))
-- `searchPagesByDate`: Searches for pages created or modified within a date range across all notebooks and sections. (Args: `days` (number, default 1), `query` (optional keyword filter), `dateField` (enum: "created", "modified", "both"), `includeContent` (boolean, optional))
+- `searchPagesByDate`: Searches for pages created or modified within a date range across all notebooks and sections. (Args: `days` (number, default 1), `query` (optional keyword filter), `dateField` (enum: "created", "modified", "both"), `includeContent` (boolean, optional), `notebookName` (optional string), `includeTeamNotebooks` (boolean, default: false))
+  - **NEW:** Can now search team notebooks with `includeTeamNotebooks: true`
+  - **NEW:** Uses cached notebook list for better performance
 - `searchPageContent`: **NEW!** Searches for text within page content (not just titles). (Args: `query` (string), `days` (optional number), `notebookId` (optional), `maxPages` (default 20))
 - `searchInNotebook`: Scoped search within a specific notebook with optional date and keyword filters. (Args: `notebookId` (string), `query` (optional string), `days` (optional number), `top` (number, max 100))
+  - **FIXED:** Now works with team notebook IDs!
 - `getPageContent`: Retrieves the content of a specific OneNote page. (Args: `pageId` (string), `format` (enum: "text", "html", "summary", optional, default: "text"))
 - `getPageByTitle`: Finds a page by its title and retrieves its content. (Args: `title` (string), `format` (enum: "text", "html", "summary", optional, default: "text"))
 
 **Productivity Tools:**
-
+Shows pages YOU modified since a date - perfect for standup prep! (Args: `sinceDate` (string or "monday"), `days` (optional number), `notebookId` (optional), `includeCreator` (boolean))
+  - **NEW:** Prevents timeouts by requiring `notebookId` when you have >30 notebooks
+  - **FIXED:** Now works with team notebook IDs!
 - `getMyRecentChanges`: **NEW!** Shows pages YOU modified since a date - perfect for standup prep! (Args: `sinceDate` (string or "monday"), `days` (optional number), `notebookId` (optional), `includeCreator` (boolean))
 - `createDailyNote`: **NEW!** Quickly create a daily note with auto-formatted date. (Args: `notebookName` (string), `sectionName` (string), `date` (optional, defaults to "today"), `title` (optional), `content` (optional))
 
