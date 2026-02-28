@@ -3,6 +3,7 @@
  * Tests basic read operations: listNotebooks, listSections, listPages, getPageContent
  */
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { fetch } from 'undici';
 import {
   setupGraphAPIMocks,
   teardownGraphAPIMocks,
@@ -70,6 +71,34 @@ describe('MCP Tools Integration Tests', () => {
       
       expect(data.value).toHaveLength(0);
       expect(Array.isArray(data.value)).toBe(true);
+    });
+
+    it('should fetch notebooks with team notebooks when includeTeamNotebooks is true', async () => {
+      const mockNotebooksWithShared = {
+        value: [
+          { id: 'notebook-1', displayName: 'Personal Notebook', sections: [] },
+          { id: 'notebook-2', displayName: 'Work Notes', sections: [] },
+          { id: 'notebook-shared-1', displayName: 'Team Project Notes', sections: [] }
+        ]
+      };
+      const scope = mockListNotebooks(mockNotebooksWithShared, true);
+      
+      const response = await fetch('https://graph.microsoft.com/v1.0/me/onenote/notebooks?includeteamnotebooks=true');
+      const data = await response.json();
+      
+      expect(data.value).toHaveLength(3);
+      expect(data.value[2].displayName).toBe('Team Project Notes');
+      expect(scope.isDone()).toBe(true);
+    });
+
+    it('should use correct endpoint when includeTeamNotebooks is false (default)', async () => {
+      const scope = mockListNotebooks(undefined, false);
+      
+      const response = await fetch('https://graph.microsoft.com/v1.0/me/onenote/notebooks');
+      const data = await response.json();
+      
+      expect(data.value).toHaveLength(2);
+      expect(scope.isDone()).toBe(true);
     });
   });
 

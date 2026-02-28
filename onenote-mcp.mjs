@@ -15,7 +15,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const tokenFilePath = path.join(__dirname, '.access-token.txt');
 const clientId = process.env.AZURE_CLIENT_ID || '14d82eec-204b-4c2f-b7e8-296a70dab67e'; // Default: Microsoft Graph Explorer App ID
-const scopes = ['Notes.Read', 'Notes.ReadWrite', 'Notes.Create', 'User.Read'];
+// Updated scopes to include .All permissions for accessing shared/team notebooks
+const scopes = ['Notes.Read', 'Notes.ReadWrite', 'Notes.Read.All', 'Notes.ReadWrite.All', 'Notes.Create', 'User.Read'];
 
 // --- Global State ---
 let accessToken = null;
@@ -444,15 +445,68 @@ Token loaded and verified.
 server.tool(
   'listNotebooks',
   {
-    // No input parameters
+    includeTeamNotebooks: z.boolean().default(false).describe('Include notebooks from Microsoft Teams you have joined. Does not include personally shared notebooks from OneDrive (Microsoft API limitation).').optional()
   },
-  async () => {
+  async ({ includeTeamNotebooks = false }) => {
     try {
       await ensureGraphClient();
-      const response = await graphClient.api('/me/onenote/notebooks').get();
-      if (response.value && response.value.length > 0) {
-        const notebookList = response.value.map((nb, i) => formatPageInfo(nb, i)).join('\n\n');
-        return { content: [{ type: 'text', text: `📚 **Your OneNote Notebooks** (${response.value.length} found):\n\n${notebookList}` }] };
+      
+      let allNotebooks = [];
+      
+      // Always get user's owned notebooks
+      const ownedResponse = await graphClient.api('/me/onenote/notebooks').get();
+      allNotebooks = ownedResponse.value || [];
+      
+      if (includeTeamNotebooks) {
+        // Get notebooks from joined teams/groups
+        try {
+          const groupsResponse = await graphClient
+            .api('/me/joinedTeams')
+            .select('id,displayName')
+            .get();
+          
+          // Process teams in parallel batches of 10 for better performance
+          const teams = groupsResponse.value || [];
+          const batchSize = 10;
+          
+          for (let i = 0; i < teams.length; i += batchSize) {
+            const batch = teams.slice(i, i + batchSize);
+            const promises = batch.map(async (team) => {
+              try {
+                const teamNotebooks = await graphClient
+                  .api(`/groups/${team.id}/onenote/notebooks`)
+                  .get();
+                
+                if (teamNotebooks.value && teamNotebooks.value.length > 0) {
+                  // Add notebooks with team context
+                  return teamNotebooks.value.map(nb => ({
+                    ...nb,
+                    _teamName: team.displayName,
+                    _isFromTeam: true
+                  }));
+                }
+                return [];
+              } catch (teamError) {
+                // Silently skip teams without notebooks or insufficient permissions
+                return [];
+              }
+            });
+            
+            const results = await Promise.all(promises);
+            results.forEach(notebooks => {
+              if (notebooks.length > 0) {
+                allNotebooks.push(...notebooks);
+              }
+            });
+          }
+        } catch (teamsError) {
+          console.error(`Error getting team notebooks: ${teamsError.message}`);
+        }
+      }
+      
+      if (allNotebooks.length > 0) {
+        const notebookList = allNotebooks.map((nb, i) => formatPageInfo(nb, i)).join('\n\n');
+        return { content: [{ type: 'text', text: `📚 **Your OneNote Notebooks** (${allNotebooks.length} found):\n\n${notebookList}` }] };
       } else {
         return { content: [{ type: 'text', text: '📚 No OneNote notebooks found.' }] };
       }

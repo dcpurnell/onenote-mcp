@@ -29,6 +29,47 @@ export const mockNotebooks = {
   ]
 };
 
+export const mockNotebooksWithShared = {
+  value: [
+    {
+      id: 'notebook-1',
+      displayName: 'Personal Notebook',
+      createdDateTime: '2024-01-15T10:00:00Z',
+      lastModifiedDateTime: '2024-02-20T15:30:00Z',
+      links: {
+        oneNoteWebUrl: {
+          href: 'https://onenote.com/notebook1'
+        }
+      },
+      sections: []
+    },
+    {
+      id: 'notebook-2',
+      displayName: 'Work Notes',
+      createdDateTime: '2024-02-01T09:00:00Z',
+      lastModifiedDateTime: '2024-02-22T12:00:00Z',
+      links: {
+        oneNoteWebUrl: {
+          href: 'https://onenote.com/notebook2'
+        }
+      },
+      sections: []
+    },
+    {
+      id: 'notebook-shared-1',
+      displayName: 'Team Project Notes',
+      createdDateTime: '2024-02-10T08:00:00Z',
+      lastModifiedDateTime: '2024-02-25T14:30:00Z',
+      links: {
+        oneNoteWebUrl: {
+          href: 'https://onenote.com/shared-notebook1'
+        }
+      },
+      sections: []
+    }
+  ]
+};
+
 export const mockSections = {
   value: [
     {
