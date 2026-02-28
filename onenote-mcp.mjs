@@ -14,15 +14,18 @@ import { z } from "zod";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const tokenFilePath = path.join(__dirname, '.access-token.txt');
+const notebookCacheFilePath = path.join(__dirname, '.notebook-cache.json');
 const clientId = process.env.AZURE_CLIENT_ID || '14d82eec-204b-4c2f-b7e8-296a70dab67e'; // Default: Microsoft Graph Explorer App ID
 // Updated scopes to include .All permissions for accessing shared/team notebooks
 const scopes = ['Notes.Read', 'Notes.ReadWrite', 'Notes.Read.All', 'Notes.ReadWrite.All', 'Notes.Create', 'User.Read'];
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 // --- Global State ---
 let accessToken = null;
 let graphClient = null;
 let notebookCache = null; // Cache of notebooks with group info
 let cacheTimestamp = null; // When cache was last updated
+let teamNotebooksLoading = false; // Flag to prevent duplicate team loads
 
 // --- MCP Server Initialization ---
 const server = new McpServer({
@@ -386,15 +389,58 @@ async function getNotebookApiPath(notebookId, resourcePath) {
 }
 
 /**
+ * Loads notebook cache from disk if available and not expired.
+ * @returns {boolean} True if cache was loaded successfully.
+ */
+function loadNotebookCacheFromDisk() {
+  try {
+    if (fs.existsSync(notebookCacheFilePath)) {
+      const cacheData = JSON.parse(fs.readFileSync(notebookCacheFilePath, 'utf8'));
+      const age = Date.now() - cacheData.timestamp;
+      
+      if (age < CACHE_TTL_MS) {
+        notebookCache = cacheData.notebooks;
+        cacheTimestamp = cacheData.timestamp;
+        console.error(`Loaded notebook cache from disk: ${notebookCache.length} notebooks (age: ${Math.round(age / 1000)}s)`);
+        return true;
+      } else {
+        console.error(`Notebook cache expired (age: ${Math.round(age / 1000)}s), will refresh`);
+      }
+    }
+  } catch (error) {
+    console.error(`Error loading notebook cache: ${error.message}`);
+  }
+  return false;
+}
+
+/**
+ * Saves notebook cache to disk.
+ */
+function saveNotebookCacheToDisk() {
+  try {
+    const cacheData = {
+      timestamp: cacheTimestamp,
+      notebooks: notebookCache
+    };
+    fs.writeFileSync(notebookCacheFilePath, JSON.stringify(cacheData, null, 2));
+    console.error(`Saved notebook cache to disk: ${notebookCache.length} notebooks`);
+  } catch (error) {
+    console.error(`Error saving notebook cache: ${error.message}`);
+  }
+}
+
+/**
  * Refreshes the notebook cache with both personal and team notebooks.
+ * Uses aggressive parallelization and progressive loading.
  * @param {boolean} includeTeams - Whether to include team notebooks.
+ * @param {boolean} personalOnly - Return immediately after loading personal notebooks.
  * @returns {Promise<Array>} Array of all notebooks with group info.
  */
-async function refreshNotebookCache(includeTeams = true) {
+async function refreshNotebookCache(includeTeams = true, personalOnly = false) {
   await ensureGraphClient();
   let allNotebooks = [];
   
-  // Get personal notebooks
+  // Get personal notebooks (fast, always complete)
   try {
     const ownedResponse = await graphClient.api('/me/onenote/notebooks').get();
     allNotebooks = (ownedResponse.value || []).map(nb => ({
@@ -403,12 +449,27 @@ async function refreshNotebookCache(includeTeams = true) {
       _groupId: null,
       _teamName: null
     }));
+    
+    // Update cache with personal notebooks immediately
+    notebookCache = allNotebooks;
+    cacheTimestamp = Date.now();
+    
+    if (personalOnly) {
+      console.error(`Loaded ${allNotebooks.length} personal notebooks (team notebooks will load in background)`);
+      // Trigger background load without waiting
+      refreshTeamNotebooksBackground().catch(err => 
+        console.error(`Background team load failed: ${err.message}`)
+      );
+      return allNotebooks;
+    }
   } catch (error) {
     console.error(`Error fetching personal notebooks: ${error.message}`);
   }
   
-  // Get team notebooks if requested
-  if (includeTeams) {
+  // Get team notebooks if requested (slow, may timeout)
+  if (includeTeams && !teamNotebooksLoading) {
+    teamNotebooksLoading = true;
+    
     try {
       const groupsResponse = await graphClient
         .api('/me/joinedTeams')
@@ -416,50 +477,115 @@ async function refreshNotebookCache(includeTeams = true) {
         .get();
       
       const teams = groupsResponse.value || [];
-      const batchSize = 10;
+      console.error(`Fetching notebooks from ${teams.length} teams in parallel...`);
       
-      for (let i = 0; i < teams.length; i += batchSize) {
-        const batch = teams.slice(i, i + batchSize);
-        const promises = batch.map(async (team) => {
-          try {
-            const teamNotebooks = await graphClient
-              .api(`/groups/${team.id}/onenote/notebooks`)
-              .get();
-            
-            if (teamNotebooks.value && teamNotebooks.value.length > 0) {
-              return teamNotebooks.value.map(nb => ({
-                ...nb,
-                displayName: nb.displayName || nb.name || `${team.displayName} Notebook`,
-                _isPersonal: false,
-                _groupId: team.id,
-                _teamName: team.displayName,
-                _isFromTeam: true
-              }));
-            }
-            return [];
-          } catch (teamError) {
-            console.error(`Error fetching notebooks for team ${team.displayName}: ${teamError.message}`);
-            return [];
+      // Remove batching - fetch ALL teams in parallel using Promise.allSettled
+      const promises = teams.map(async (team) => {
+        try {
+          const teamNotebooks = await graphClient
+            .api(`/groups/${team.id}/onenote/notebooks`)
+            .get();
+          
+          if (teamNotebooks.value && teamNotebooks.value.length > 0) {
+            return teamNotebooks.value.map(nb => ({
+              ...nb,
+              displayName: nb.displayName || nb.name || `${team.displayName} Notebook`,
+              _isPersonal: false,
+              _groupId: team.id,
+              _teamName: team.displayName,
+              _isFromTeam: true
+            }));
           }
-        });
-        
-        const results = await Promise.all(promises);
-        results.forEach(notebooks => {
-          if (notebooks.length > 0) {
-            allNotebooks.push(...notebooks);
-          }
-        });
-      }
+          return [];
+        } catch (teamError) {
+          console.error(`Error fetching notebooks for team ${team.displayName}: ${teamError.message}`);
+          return [];
+        }
+      });
+      
+      // Use allSettled to not fail on individual team errors
+      const results = await Promise.allSettled(promises);
+      const teamNotebooks = results
+        .filter(r => r.status === 'fulfilled')
+        .flatMap(r => r.value);
+      
+      allNotebooks.push(...teamNotebooks);
+      console.error(`Loaded ${teamNotebooks.length} team notebooks from ${teams.length} teams`);
+      
     } catch (teamsError) {
       console.error(`Error getting team notebooks: ${teamsError.message}`);
+    } finally {
+      teamNotebooksLoading = false;
     }
   }
   
   notebookCache = allNotebooks;
   cacheTimestamp = Date.now();
+  saveNotebookCacheToDisk(); // Persist to disk
   console.error(`Notebook cache refreshed: ${allNotebooks.length} notebooks (${allNotebooks.filter(nb => nb._isPersonal).length} personal, ${allNotebooks.filter(nb => !nb._isPersonal).length} team)`);
   
   return allNotebooks;
+}
+
+/**
+ * Refreshes team notebooks in the background without blocking.
+ * Updates cache progressively as teams complete.
+ */
+async function refreshTeamNotebooksBackground() {
+  if (teamNotebooksLoading || !graphClient) return;
+  
+  teamNotebooksLoading = true;
+  console.error('Starting background team notebook refresh...');
+  
+  try {
+    await ensureGraphClient();
+    const groupsResponse = await graphClient
+      .api('/me/joinedTeams')
+      .select('id,displayName')
+      .get();
+    
+    const teams = groupsResponse.value || [];
+    console.error(`Fetching notebooks from ${teams.length} teams in background...`);
+    
+    const promises = teams.map(async (team) => {
+      try {
+        const teamNotebooks = await graphClient
+          .api(`/groups/${team.id}/onenote/notebooks`)
+          .get();
+        
+        if (teamNotebooks.value && teamNotebooks.value.length > 0) {
+          return teamNotebooks.value.map(nb => ({
+            ...nb,
+            displayName: nb.displayName || nb.name || `${team.displayName} Notebook`,
+            _isPersonal: false,
+            _groupId: team.id,
+            _teamName: team.displayName,
+            _isFromTeam: true
+          }));
+        }
+        return [];
+      } catch (teamError) {
+        return [];
+      }
+    });
+    
+    const results = await Promise.allSettled(promises);
+    const teamNotebooks = results
+      .filter(r => r.status === 'fulfilled')
+      .flatMap(r => r.value);
+    
+    // Merge with existing cache (keep personal notebooks)
+    const personalNotebooks = notebookCache?.filter(nb => nb._isPersonal) || [];
+    notebookCache = [...personalNotebooks, ...teamNotebooks];
+    cacheTimestamp = Date.now();
+    saveNotebookCacheToDisk();
+    
+    console.error(`Background refresh complete: ${teamNotebooks.length} team notebooks loaded`);
+  } catch (error) {
+    console.error(`Background team notebook refresh failed: ${error.message}`);
+  } finally {
+    teamNotebooksLoading = false;
+  }
 }
 
 // ============================================================================
@@ -572,11 +698,18 @@ server.tool(
     try {
       await ensureGraphClient();
       
-      // Use cache if available and not expired (5 minutes)
-      const cacheExpired = !cacheTimestamp || (Date.now() - cacheTimestamp > 5 * 60 * 1000);
+      // Use cache if available and not expired
+      const cacheExpired = !cacheTimestamp || (Date.now() - cacheTimestamp > CACHE_TTL_MS);
       
       if (refresh || cacheExpired || !notebookCache) {
-        await refreshNotebookCache(includeTeamNotebooks);
+        // Progressive loading: for team notebooks, return personal immediately
+        if (includeTeamNotebooks && !refresh) {
+          // Load personal notebooks immediately, teams in background
+          await refreshNotebookCache(true, true); // personalOnly=true
+        } else {
+          // Full refresh (may timeout with many teams)
+          await refreshNotebookCache(includeTeamNotebooks);
+        }
       }
       
       let allNotebooks = notebookCache || [];
@@ -588,8 +721,11 @@ server.tool(
       
       if (allNotebooks.length > 0) {
         const notebookList = allNotebooks.map((nb, i) => formatPageInfo(nb, i)).join('\n\n');
+        const teamInfo = includeTeamNotebooks && teamNotebooksLoading 
+          ? '\n\n⏳ Team notebooks loading in background...' 
+          : '';
         const cacheInfo = refresh ? '' : '\n\n💡 Use `refresh: true` to update the notebook list.';
-        return { content: [{ type: 'text', text: `📚 **Your OneNote Notebooks** (${allNotebooks.length} found):\n\n${notebookList}${cacheInfo}` }] };
+        return { content: [{ type: 'text', text: `📚 **Your OneNote Notebooks** (${allNotebooks.length} found):\n\n${notebookList}${teamInfo}${cacheInfo}` }] };
       } else {
         return { content: [{ type: 'text', text: '📚 No OneNote notebooks found.' }] };
       }
@@ -1744,6 +1880,14 @@ async function main() {
   loadExistingToken(); // Attempt to load token at startup
   if (accessToken) {
     initializeGraphClient(); // Initialize client if token was loaded
+    
+    // Load notebook cache from disk if available
+    const cacheLoaded = loadNotebookCacheFromDisk();
+    if (cacheLoaded) {
+      console.error('📦 Notebook cache loaded from disk');
+    } else {
+      console.error('💾 No valid cache found, will load on first use');
+    }
   }
 
   try {

@@ -15,6 +15,7 @@ yarn-error.log*
 
 # Sensitive files
 .access-token.txt
+.notebook-cache.json
 
 # OS files
 .DS_Store
