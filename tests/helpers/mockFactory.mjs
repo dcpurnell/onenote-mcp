@@ -4,6 +4,7 @@
 import nock from 'nock';
 import {
   mockNotebooks,
+  mockNotebooksWithShared,
   mockSections,
   mockPages,
   mockPageContentHTML,
@@ -34,11 +35,15 @@ export function teardownGraphAPIMocks() {
 /**
  * Mocks the notebooks list endpoint
  * @param {Object} response - Custom response (defaults to mockNotebooks)
+ * @param {boolean} includeTeamNotebooks - Whether to mock the includeTeamNotebooks query parameter
  * @returns {nock.Scope} Nock scope
  */
-export function mockListNotebooks(response = mockNotebooks) {
+export function mockListNotebooks(response = mockNotebooks, includeTeamNotebooks = false) {
+  const path = includeTeamNotebooks 
+    ? `${GRAPH_API_VERSION}/me/onenote/notebooks?includeteamnotebooks=true`
+    : `${GRAPH_API_VERSION}/me/onenote/notebooks`;
   return nock(GRAPH_API_BASE)
-    .get(`${GRAPH_API_VERSION}/me/onenote/notebooks`)
+    .get(path)
     .reply(200, response);
 }
 

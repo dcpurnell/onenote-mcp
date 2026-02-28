@@ -59,6 +59,7 @@ page manipulation.
     recommended** to create your own Azure App Registration.
   - Ensure your app registration has the following delegated Microsoft Graph
     API permissions: `Notes.Read`, `Notes.ReadWrite`, `Notes.Create`, `User.Read`.
+  - **For accessing shared notebooks and team notebooks**, also add: `Notes.Read.All`, `Notes.ReadWrite.All`.
   - You will need the "Application (client) ID" from your app registration.
 
 ## Installation
@@ -176,7 +177,7 @@ This server exposes the following tools to your AI assistant:
 
 **Reading OneNote Data:**
 
-- `listNotebooks`: Lists all your OneNote notebooks.
+- `listNotebooks`: Lists all your OneNote notebooks. (Args: `includeTeamNotebooks` (boolean, optional, default: false - when true, includes notebooks from Microsoft Teams you're a member of. **Requires Notes.Read.All or Notes.ReadWrite.All permissions.** Does not include personally shared notebooks from OneDrive due to Microsoft API limitations.))
 - `listSections`: Lists all sections in a specific notebook. (Args: `notebookId` (string))
 - `listPagesInSection`: Lists pages in a specific section with pagination support. (Args: `sectionId` (string), `top` (number, optional, max 100), `orderBy` (enum: "created", "modified", optional))
 - `searchPages`: Searches for pages by title across all notebooks with full pagination. (Arg: `query` (optional string))
