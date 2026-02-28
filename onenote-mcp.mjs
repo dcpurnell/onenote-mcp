@@ -905,9 +905,26 @@ server.tool(
         
         totalSectionsChecked += sections.length;
         
-        // Query all sections in parallel
+        // Calculate reasonable top limit based on days (estimate ~10 pages per day, max 100)
+        const topLimit = Math.min(100, Math.max(20, days * 10));
+        
+        // Query all sections in parallel with optimized query
         const pages = await queryAllSectionsParallel(sections, async (section) => {
-          const sectionPages = await paginateGraphRequest(`/me/onenote/sections/${section.id}/pages`);
+          // Use $orderby and $top for efficient server-side filtering
+          let sectionPages = [];
+          try {
+            const response = await retryWithBackoff(() => 
+              graphClient
+                .api(`/me/onenote/sections/${section.id}/pages`)
+                .orderby('lastModifiedDateTime desc')
+                .top(topLimit)
+                .get()
+            );
+            sectionPages = response.value || [];
+          } catch (error) {
+            console.error(`Error fetching pages for section ${section.displayName}: ${error.message}`);
+            return [];
+          }
           
           // Filter by date and query
           const matchingPages = sectionPages.filter(page => {
@@ -1206,11 +1223,30 @@ server.tool(
           continue; // Skip this notebook if we can't access it
         }
         
-        // Query all sections in parallel
+        // Calculate reasonable top limit based on days (estimate ~10 pages per day, max 100)
+        const daysCount = days || (sinceDate ? Math.ceil((Date.now() - threshold.getTime()) / (24 * 60 * 60 * 1000)) : 3);
+        const topLimit = Math.min(100, Math.max(20, daysCount * 10));
+        
+        // Query all sections in parallel with optimized query
         const pages = await queryAllSectionsParallel(sections, async (section) => {
-          const sectionPages = await paginateGraphRequest(`/me/onenote/sections/${section.id}/pages`);
+          // Use $orderby and $top for efficient server-side filtering
+          // This fetches only the most recently modified pages instead of ALL pages
+          let sectionPages = [];
+          try {
+            const response = await retryWithBackoff(() => 
+              graphClient
+                .api(`/me/onenote/sections/${section.id}/pages`)
+                .orderby('lastModifiedDateTime desc')
+                .top(topLimit)
+                .get()
+            );
+            sectionPages = response.value || [];
+          } catch (error) {
+            console.error(`Error fetching pages for section ${section.displayName}: ${error.message}`);
+            return [];
+          }
           
-          // Filter by modification date
+          // Filter by modification date (most should pass since we're ordering by desc)
           const matchingPages = sectionPages.filter(page => {
             const modified = new Date(page.lastModifiedDateTime);
             return modified >= threshold;
