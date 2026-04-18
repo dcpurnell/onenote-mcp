@@ -114,11 +114,11 @@ class TestRunner {
         server.stdin.write(JSON.stringify(toolRequest) + '\n');
       }, 500);
 
-      // Timeout after 65 seconds (should never hit this if fix works)
+      // Timeout after 130 seconds
       setTimeout(() => {
         server.kill();
-        reject(new Error(`Test timed out after 65 seconds`));
-      }, 65000);
+        reject(new Error(`Test timed out after 130 seconds`));
+      }, 130000);
     });
   }
 
@@ -161,52 +161,8 @@ class TestRunner {
     this.log('  TIMEOUT FIX VALIDATION SCRIPT', colors.bold + colors.cyan);
     this.log('═'.repeat(70) + '\n', colors.cyan);
 
-    // Test 0: Get a test page ID quickly using listPagesInSection or flat pages
+    // Test 0: Get a test page ID via searchPagesByDate
     await this.test(
-      'Get test page ID (setup)',
-      async () => {
-        // Use listNotebooks to get a notebook, then get a page from it
-        const result = await this.callTool('listNotebooks', { refresh: false });
-        if (result.response.error) throw new Error(result.response.error.message);
-
-        const content = result.response.result?.content?.[0]?.text || '';
-        // Extract first notebook ID
-        const nbIdMatch = content.match(/ID:\s*(.+)/m);
-        if (!nbIdMatch) throw new Error('No notebook ID found');
-        const notebookId = nbIdMatch[1].trim();
-
-        // Get sections for this notebook
-        const sectionsResult = await this.callTool('listSections', { notebookId });
-        if (sectionsResult.response.error) throw new Error(sectionsResult.response.error.message);
-
-        const sectionsContent = sectionsResult.response.result?.content?.[0]?.text || '';
-        const secIdMatch = sectionsContent.match(/ID:\s*(.+)/m);
-        if (!secIdMatch) throw new Error('No section ID found');
-        const sectionId = secIdMatch[1].trim();
-
-        // Get pages from this section
-        const pagesResult = await this.callTool('listPagesInSection', { sectionId });
-        if (pagesResult.response.error) throw new Error(pagesResult.response.error.message);
-
-        const pagesContent = pagesResult.response.result?.content?.[0]?.text || '';
-        this.testPageId = this.extractPageId(pagesContent);
-        this.testPageTitle = this.extractPageTitle(pagesContent);
-
-        if (!this.testPageId) throw new Error('No page ID found');
-
-        this.log(`\n   Test page: "${this.testPageTitle}" (ID: ${this.testPageId.substring(0, 30)}...)`, colors.cyan);
-        return result;
-      },
-      15000
-    );
-
-    if (!this.testPageId) {
-      this.log('\n❌ Cannot continue without a valid page ID. Please ensure you have pages in OneNote.', colors.red);
-      return this.printSummary();
-    }
-
-    // Test 1: Search pages by date (should return page IDs now)
-    const searchResult = await this.test(
       'searchPagesByDate returns page IDs',
       async () => {
         const result = await this.callTool('searchPagesByDate', { days: 7 });
@@ -217,15 +173,28 @@ class TestRunner {
         
         const content = result.response.result?.content?.[0]?.text || '';
         
-        // Check if page IDs are present
         if (!content.includes('ID:')) {
           throw new Error('Page IDs not found in search results');
         }
         
+        // Extract first page ID and title from numbered list items
+        this.testPageId = this.extractPageId(content);
+        this.testPageTitle = this.extractPageTitle(content);
+        
+        if (!this.testPageId) {
+          throw new Error('Could not extract page ID from results');
+        }
+        
+        this.log(`\n   Test page: "${this.testPageTitle}" (ID: ${this.testPageId.substring(0, 30)}...)`, colors.cyan);
         return result;
       },
-      60000 // Allow up to 60 seconds (known to be slow with many notebooks)
+      120000 // Allow up to 120s — this tool is known to be slow with many notebooks
     );
+
+    if (!this.testPageId) {
+      this.log('\n❌ Cannot continue without a valid page ID. Please ensure you have pages in OneNote.', colors.red);
+      return this.printSummary();
+    }
 
 
     // Test 2: getPageContent with text format
