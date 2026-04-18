@@ -3,7 +3,6 @@
  * Tests basic read operations: listNotebooks, listSections, listPages, getPageContent
  */
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { fetch } from 'undici';
 import {
   setupGraphAPIMocks,
   teardownGraphAPIMocks,
