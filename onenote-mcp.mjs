@@ -310,9 +310,19 @@ async function fetchPageContentAdvanced(pageId, method = 'httpDirect') {
   await ensureGraphClient();
   if (method === 'httpDirect') {
     const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${pageId}/content`;
-    const response = await fetch(url, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-    if (!response.ok) throw new Error(`HTTP error fetching page content! Status: ${response.status} ${response.statusText}`);
-    return await response.text();
+    try {
+      const response = await fetch(url, { 
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(45000) // 45 second timeout, leaving headroom under 60s MCP limit
+      });
+      if (!response.ok) throw new Error(`HTTP error fetching page content! Status: ${response.status} ${response.statusText}`);
+      return await response.text();
+    } catch (error) {
+      if (error.name === 'TimeoutError' || error.name === 'AbortError') {
+        throw new Error(`Request timed out after 45 seconds while fetching page content. The page may be too large or the server is slow to respond.`);
+      }
+      throw error;
+    }
   } else { // 'direct'
     return await graphClient.api(`/me/onenote/pages/${pageId}/content`).get();
   }
@@ -1141,6 +1151,7 @@ server.tool(
         const page = displayPages[i];
         const webUrl = page.links?.oneNoteWebUrl?.href || '';
         resultText += `${i + 1}. **${page.title}**\n`;
+        resultText += `   ID: ${page.id}\n`;
         resultText += `   📚 ${page._notebook} / 📂 ${page._section}\n`;
         if (webUrl) resultText += `   🔗 <${webUrl}>\n`;
         resultText += `   Created: ${new Date(page.createdDateTime).toLocaleString()}\n`;
@@ -1254,6 +1265,7 @@ server.tool(
         const page = matchingPages[i];
         const webUrl = page.links?.oneNoteWebUrl?.href || '';
         resultText += `${i + 1}. **${page.title}**\n`;
+        resultText += `   ID: ${page.id}\n`;
         resultText += `   📚 ${page._notebook} / 📂 ${page._section}\n`;
         if (webUrl) resultText += `   🔗 <${webUrl}>\n`;
         resultText += `   Modified: ${new Date(page.lastModifiedDateTime).toLocaleString()}\n`;
@@ -1794,7 +1806,8 @@ server.tool(
       const response = await fetch(url, {
         method: 'PATCH',
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify([{ target: 'body', action: 'replace', content: finalHtml }])
+        body: JSON.stringify([{ target: 'body', action: 'replace', content: finalHtml }]),
+        signal: AbortSignal.timeout(45000)
       });
       
       if (!response.ok) throw new Error(`Update failed: ${response.status} ${response.statusText}`);
@@ -1830,7 +1843,8 @@ server.tool(
       const response = await fetch(url, {
         method: 'PATCH',
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify([{ target: 'body', action: 'append', content: appendHtml }])
+        body: JSON.stringify([{ target: 'body', action: 'append', content: appendHtml }]),
+        signal: AbortSignal.timeout(45000)
       });
       
       if (!response.ok) throw new Error(`Append failed: ${response.status} ${response.statusText}`);
@@ -1859,7 +1873,8 @@ server.tool(
       const response = await fetch(url, {
         method: 'PATCH',
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify([{ target: 'title', action: 'replace', content: newTitle }])
+        body: JSON.stringify([{ target: 'title', action: 'replace', content: newTitle }]),
+        signal: AbortSignal.timeout(45000)
       });
       
       if (!response.ok) throw new Error(`Title update failed: ${response.status} ${response.statusText}`);
@@ -1899,7 +1914,8 @@ server.tool(
       const response = await fetch(url, {
         method: 'PATCH',
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify([{ target: 'body', action: 'replace', content: `<div>${updatedContent}</div>` }])
+        body: JSON.stringify([{ target: 'body', action: 'replace', content: `<div>${updatedContent}</div>` }]),
+        signal: AbortSignal.timeout(45000)
       });
       
       if (!response.ok) throw new Error(`Replace failed: ${response.status} ${response.statusText}`);
@@ -1944,7 +1960,8 @@ server.tool(
       const response = await fetch(url, {
         method: 'PATCH',
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify([{ target: 'body', action: action, content: noteHtml }])
+        body: JSON.stringify([{ target: 'body', action: action, content: noteHtml }]),
+        signal: AbortSignal.timeout(45000)
       });
       
       if (!response.ok) throw new Error(`Add note failed: ${response.status} ${response.statusText}`);
@@ -1986,7 +2003,8 @@ server.tool(
       const response = await fetch(url, {
         method: 'PATCH',
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify([{ target: 'body', action: action, content: tableHtml }])
+        body: JSON.stringify([{ target: 'body', action: action, content: tableHtml }]),
+        signal: AbortSignal.timeout(45000)
       });
       
       if (!response.ok) throw new Error(`Add table failed: ${response.status} ${response.statusText}`);
