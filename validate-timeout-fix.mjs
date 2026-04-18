@@ -32,7 +32,7 @@ function log(msg, color = colors.reset) {
 function callTool(toolName, args = {}, timeoutMs = 120000) {
   return new Promise((resolve, reject) => {
     const server = spawn('node', ['onenote-mcp.mjs'], {
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'inherit']
     });
 
     let buffer = '';

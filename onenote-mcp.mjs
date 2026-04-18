@@ -476,6 +476,7 @@ function saveNotebookCacheToDisk() {
  */
 async function refreshNotebookCache(includeTeams = true, personalOnly = false) {
   await ensureGraphClient();
+  const previousCache = notebookCache ? [...notebookCache] : null;
   let allNotebooks = [];
   
   // Get personal notebooks (fast, always complete)
@@ -557,9 +558,16 @@ async function refreshNotebookCache(includeTeams = true, personalOnly = false) {
     }
   }
   
-  notebookCache = allNotebooks;
-  cacheTimestamp = Date.now();
-  saveNotebookCacheToDisk(); // Persist to disk
+  // Only update cache if we got results, or if there was no prior cache
+  if (allNotebooks.length > 0 || !previousCache || previousCache.length === 0) {
+    notebookCache = allNotebooks;
+    cacheTimestamp = Date.now();
+    saveNotebookCacheToDisk(); // Persist to disk
+  } else {
+    // Restore previous cache to avoid losing data on throttle
+    notebookCache = previousCache;
+    console.error(`Skipping cache update: API returned 0 notebooks but existing cache has ${previousCache.length}`);
+  }
   console.error(`Notebook cache refreshed: ${allNotebooks.length} notebooks (${allNotebooks.filter(nb => nb._isPersonal).length} personal, ${allNotebooks.filter(nb => !nb._isPersonal).length} team)`);
   
   return allNotebooks;
