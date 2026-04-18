@@ -1755,7 +1755,7 @@ server.tool(
       const searchTerm = title.toLowerCase();
       let matchingPage = null;
 
-      // Strategy 1: Use Graph OData filter to search by title (single API call)
+      // Strategy 1: Use flat /me/onenote/pages endpoint with OData filter (single API call)
       try {
         const filterQuery = `/me/onenote/pages?$filter=contains(tolower(title),'${searchTerm.replace(/'/g, "''")}')&$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=1&$orderby=lastModifiedDateTime desc`;
         const searchResponse = await graphClient.api(filterQuery).get();
@@ -1765,41 +1765,34 @@ server.tool(
           console.error(`Found page via OData filter: "${matchingPage.title}"`);
         }
       } catch (filterError) {
-        console.error(`OData filter not supported, falling back to cached search: ${filterError.message}`);
+        console.error(`OData filter not supported: ${filterError.message}`);
       }
 
-      // Strategy 2: Use notebook cache + parallel section queries with early exit
+      // Strategy 2: Paginate through /me/onenote/pages (flat list, no notebook/section iteration)
       if (!matchingPage) {
-        if (!notebookCache) {
-          await refreshNotebookCache(true);
-        }
-        const notebooks = notebookCache || [];
+        console.error(`Falling back to flat pages list scan for "${title}"...`);
+        let nextLink = `/me/onenote/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=100&$orderby=lastModifiedDateTime desc`;
+        let pagesScanned = 0;
 
-        if (notebooks.length === 0) {
-          return { isError: true, content: [{ type: 'text', text: '📚 No notebooks found.' }] };
-        }
+        while (nextLink && !matchingPage) {
+          const response = await retryWithBackoff(() => graphClient.api(nextLink).get());
+          const pages = response.value || [];
+          pagesScanned += pages.length;
 
-        // Collect all sections from all notebooks in parallel
-        const sectionResults = await Promise.allSettled(
-          notebooks.map(async (notebook) => {
-            const sectionsPath = notebook._groupId
-              ? `/groups/${notebook._groupId}/onenote/notebooks/${notebook.id}/sections`
-              : `/me/onenote/notebooks/${notebook.id}/sections`;
-            try {
-              return await paginateGraphRequest(sectionsPath);
-            } catch (err) {
-              console.error(`Error fetching sections for notebook ${notebook.displayName}: ${err.message}`);
-              return [];
+          matchingPage = pages.find(p => p.title && p.title.toLowerCase().includes(searchTerm));
+
+          if (!matchingPage) {
+            nextLink = response['@odata.nextLink'] || null;
+            // Cap at 500 pages to avoid excessive API calls
+            if (pagesScanned >= 500) {
+              console.error(`Scanned ${pagesScanned} pages without finding a match, stopping.`);
+              break;
             }
-          })
-        );
-
-        const allSections = sectionResults
-          .filter(r => r.status === 'fulfilled')
-          .flatMap(r => r.value);
-
-        // Query sections in parallel, stop as soon as we find a match
-        matchingPage = await findPageInSectionsParallel(allSections, searchTerm);
+          }
+        }
+        if (matchingPage) {
+          console.error(`Found page via flat scan after ${pagesScanned} pages: "${matchingPage.title}"`);
+        }
       }
 
       if (!matchingPage) {
