@@ -35,6 +35,10 @@ page manipulation.
 - ✅ List sections in team notebooks (no more "resource ID does not exist" errors)
 - ✅ Search and get recent changes in team notebooks
 - ✅ Fixed display name issues (`undefined` → proper names)
+- ✅ **Full site-based endpoint routing** — all tools (read, search, create, edit) now route through `/sites/{siteId}/onenote` for SharePoint notebooks instead of failing via `/me/onenote`
+- ✅ **Edit team notebook pages** — updatePageContent, appendToPage, replaceTextInPage, addNoteToPage, addTableToPage all work with team notebooks
+- ✅ **Create pages in team notebooks** — createDailyNote and createPage now support team notebooks
+- ✅ **getPageByTitle** searches team notebooks when personal search finds no match
 
 **[Team Notebooks Documentation →](TEAM_NOTEBOOKS_FIX.md)**
 
@@ -217,11 +221,12 @@ This server exposes the following tools to your AI assistant:
 - `listSections`: Lists all sections in a specific notebook. (Args: `notebookId` (string))
   - **FIXED:** Now works with team notebook IDs!
 - `listPagesInSection`: Lists pages in a specific section with pagination support. (Args: `sectionId` (string), `top` (number, optional, max 100), `orderBy` (enum: "created", "modified", optional))
-- `searchPages`: **OPTIMIZED!** Searches for pages by title across all notebooks with server-side sorting and pagination. (Args: `query` (optional string), `notebookId` (optional string), `notebookName` (optional string), `top` (number, default 100, max 100), `orderBy` (enum: "created", "modified", "title", default: "modified"), `maxResults` (number, default 50, max 200))
+- `searchPages`: **OPTIMIZED!** Searches for pages by title across all notebooks with server-side sorting and pagination. (Args: `query` (optional string), `notebookId` (optional string), `notebookName` (optional string), `top` (number, default 100, max 100), `orderBy` (enum: "created", "modified", "title", default: "modified"), `maxResults` (number, default 50, max 200), `includeTeamNotebooks` (boolean, default: false))
   - **NEW:** Uses `$orderby` and `$top` for 10-30x performance improvement
   - **NEW:** Can scope search to specific notebook by ID or name
   - **NEW:** Configurable result limits and sort order
   - **NEW:** Shows notebook name for each result
+  - **NEW:** `includeTeamNotebooks` option to search SharePoint/Teams notebooks via site-based routing
 - `searchPagesByDate`: Searches for pages created or modified within a date range across all notebooks and sections. (Args: `days` (number, default 1), `query` (optional keyword filter), `dateField` (enum: "created", "modified", "both"), `includeContent` (boolean, optional), `notebookName` (optional string), `includeTeamNotebooks` (boolean, default: false))
   - **OPTIMIZED:** Uses `$orderby` and `$top` for 90%+ reduction in API calls
   - **NEW:** Can now search team notebooks with `includeTeamNotebooks: true`

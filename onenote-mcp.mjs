@@ -26,6 +26,8 @@ let graphClient = null;
 let notebookCache = null; // Cache of notebooks with group info
 let cacheTimestamp = null; // When cache was last updated
 let teamNotebooksLoading = false; // Flag to prevent duplicate team loads
+let sectionToNotebookMap = {}; // Maps sectionId → notebookId for page→endpoint resolution
+let resolvedSiteIds = {}; // Cache of siteUrl → siteId to avoid re-resolving
 
 // --- MCP Server Initialization ---
 const server = new McpServer({
@@ -214,6 +216,168 @@ function textToHtml(text) {
 // ONENOTE API UTILITIES
 // ============================================================================
 
+// ---- SharePoint Site Resolution & Endpoint Routing ----
+
+/**
+ * Parses a SharePoint URL to extract the hostname and site-relative path.
+ * Returns null for personal OneDrive URLs (-my.sharepoint.com).
+ * @param {string} url - The SharePoint URL from the notebook cache.
+ * @returns {{ hostname: string, sitePath: string } | null}
+ */
+function parseSharePointUrl(url) {
+  if (!url) return null;
+  const match = url.match(/^https:\/\/([^/]+)\/(sites|teams)\/([^/]+)/i);
+  if (!match) return null;
+  const hostname = match[1];
+  // Personal OneDrive URLs use -my.sharepoint.com
+  if (hostname.includes('-my.sharepoint.com')) return null;
+  const sitePath = `${match[2]}/${match[3]}`;
+  return { hostname, sitePath };
+}
+
+/**
+ * Resolves a SharePoint site URL to a Graph site ID.
+ * Caches results to avoid redundant API calls.
+ * @param {string} siteUrl - The full SharePoint site URL (e.g. https://host/sites/Name).
+ * @returns {Promise<string>} The Graph site ID.
+ */
+async function resolveSiteId(siteUrl) {
+  // Check cache first
+  if (resolvedSiteIds[siteUrl]) {
+    return resolvedSiteIds[siteUrl];
+  }
+
+  const parsed = parseSharePointUrl(siteUrl);
+  if (!parsed) {
+    throw new Error(`Cannot resolve site ID from URL: ${siteUrl}`);
+  }
+
+  await ensureGraphClient();
+  const response = await graphClient.api(`/sites/${parsed.hostname}:/${parsed.sitePath}`).get();
+  const siteId = response.id;
+  resolvedSiteIds[siteUrl] = siteId;
+  console.error(`Resolved site ID for ${siteUrl}: ${siteId}`);
+  return siteId;
+}
+
+/**
+ * Returns the correct OneNote API base path for a notebook.
+ * For personal notebooks: /me/onenote
+ * For SharePoint-hosted team notebooks: /sites/{siteId}/onenote
+ * For group-hosted team notebooks (fallback): /groups/{groupId}/onenote
+ * @param {object} notebook - A notebook cache entry with _isPersonal, _groupId, _siteId, links fields.
+ * @returns {Promise<string>} The base path (e.g., "/me/onenote" or "/sites/{siteId}/onenote").
+ */
+async function getOnenoteBasePath(notebook) {
+  if (!notebook) return '/me/onenote';
+  if (notebook._isPersonal) return '/me/onenote';
+
+  // If we already have a resolved site ID, use it
+  if (notebook._siteId) {
+    return `/sites/${notebook._siteId}/onenote`;
+  }
+
+  // Try to resolve from the notebook's web URL
+  const webUrl = notebook.links?.oneNoteWebUrl?.href || '';
+  const parsed = parseSharePointUrl(webUrl);
+  if (parsed) {
+    try {
+      const siteUrl = `https://${parsed.hostname}/${parsed.sitePath}`;
+      const siteId = await resolveSiteId(siteUrl);
+      notebook._siteId = siteId;
+      notebook._siteUrl = siteUrl;
+      return `/sites/${siteId}/onenote`;
+    } catch (error) {
+      console.error(`Failed to resolve site ID from web URL, falling back to group: ${error.message}`);
+    }
+  }
+
+  // Fallback to group endpoint if groupId is available
+  if (notebook._groupId) {
+    return `/groups/${notebook._groupId}/onenote`;
+  }
+
+  // Last resort: personal endpoint
+  return '/me/onenote';
+}
+
+/**
+ * Looks up a notebook from the cache by ID and returns its base path.
+ * @param {string} notebookId - The notebook ID.
+ * @returns {Promise<string>} The OneNote API base path.
+ */
+async function getBasePathForNotebook(notebookId) {
+  if (notebookCache) {
+    const notebook = notebookCache.find(nb => nb.id === notebookId);
+    if (notebook) return getOnenoteBasePath(notebook);
+  }
+  // If not in cache, refresh and try again
+  await refreshNotebookCache();
+  const notebook = notebookCache?.find(nb => nb.id === notebookId);
+  if (notebook) return getOnenoteBasePath(notebook);
+  return '/me/onenote';
+}
+
+/**
+ * Registers a section→notebook mapping so we can route page requests correctly.
+ * @param {string} sectionId - The section ID.
+ * @param {string} notebookId - The parent notebook ID.
+ */
+function registerSectionMapping(sectionId, notebookId) {
+  sectionToNotebookMap[sectionId] = notebookId;
+}
+
+/**
+ * Returns the base path for a section (by looking up its parent notebook).
+ * @param {string} sectionId - The section ID.
+ * @returns {Promise<string>} The OneNote API base path.
+ */
+async function getBasePathForSection(sectionId) {
+  const notebookId = sectionToNotebookMap[sectionId];
+  if (notebookId) {
+    return getBasePathForNotebook(notebookId);
+  }
+  // Unknown section — default to /me/onenote
+  return '/me/onenote';
+}
+
+/**
+ * Returns the base path for a page ID by looking it up via Graph metadata.
+ * Falls back to /me/onenote if lookup fails.
+ * @param {string} pageId - The page ID.
+ * @returns {Promise<string>} The OneNote API base path.
+ */
+async function getBasePathForPage(pageId) {
+  // Try /me/ first (common case for personal notebooks)
+  try {
+    await ensureGraphClient();
+    const pageInfo = await graphClient.api(`/me/onenote/pages/${pageId}?$select=id,parentSection`).get();
+    if (pageInfo?.parentSection?.id) {
+      registerSectionMapping(pageInfo.parentSection.id, ''); // we don't know notebook yet
+    }
+    return '/me/onenote';
+  } catch (error) {
+    // /me/ failed — try each known site endpoint
+    if (notebookCache) {
+      const siteNotebooks = notebookCache.filter(nb => !nb._isPersonal);
+      const seenSiteIds = new Set();
+      for (const nb of siteNotebooks) {
+        const basePath = await getOnenoteBasePath(nb);
+        if (basePath === '/me/onenote' || seenSiteIds.has(basePath)) continue;
+        seenSiteIds.add(basePath);
+        try {
+          await graphClient.api(`${basePath}/pages/${pageId}?$select=id`).get();
+          return basePath;
+        } catch {
+          // This site doesn't own this page, try next
+        }
+      }
+    }
+    // Last resort
+    return '/me/onenote';
+  }
+}
+
 /**
  * Implements exponential backoff retry logic for rate limiting.
  * @param {Function} apiCall - The async function to execute.
@@ -312,8 +476,9 @@ async function findPageInSectionsParallel(sections, searchTerm, concurrency = 5)
     const batch = sections.slice(i, i + concurrency);
     const batchResults = await Promise.allSettled(
       batch.map(async (section) => {
+        const basePath = await getBasePathForSection(section.id);
         const pages = await paginateGraphRequest(
-          `/me/onenote/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=50`
+          `${basePath}/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=50`
         );
         return pages.find(p => p.title && p.title.toLowerCase().includes(searchTerm));
       })
@@ -332,12 +497,16 @@ async function findPageInSectionsParallel(sections, searchTerm, concurrency = 5)
  * Fetches the content of a OneNote page.
  * @param {string} pageId - The ID of the page.
  * @param {'httpDirect' | 'direct'} [method='httpDirect'] - The method to use for fetching.
+ * @param {string} [basePath='/me/onenote'] - The OneNote API base path for this page's owner.
  * @returns {Promise<string>} The HTML content of the page.
  */
-async function fetchPageContentAdvanced(pageId, method = 'httpDirect') {
+async function fetchPageContentAdvanced(pageId, method = 'httpDirect', basePath = null) {
   await ensureGraphClient();
+  if (!basePath) {
+    basePath = await getBasePathForPage(pageId);
+  }
   if (method === 'httpDirect') {
-    const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${pageId}/content`;
+    const url = `https://graph.microsoft.com/v1.0${basePath}/pages/${pageId}/content`;
     try {
       const response = await fetch(url, { 
         headers: { 'Authorization': `Bearer ${accessToken}` },
@@ -352,7 +521,7 @@ async function fetchPageContentAdvanced(pageId, method = 'httpDirect') {
       throw error;
     }
   } else { // 'direct'
-    return await graphClient.api(`/me/onenote/pages/${pageId}/content`).get();
+    return await graphClient.api(`${basePath}/pages/${pageId}/content`).get();
   }
 }
 
@@ -392,6 +561,7 @@ function formatPageInfo(page, index = null, includeCreator = false) {
 
 /**
  * Gets the correct API path for accessing notebook resources.
+ * Supports personal (/me/), SharePoint site (/sites/), and group (/groups/) endpoints.
  * @param {string} notebookId - The notebook ID.
  * @param {string} resourcePath - The resource path (e.g., 'sections', 'pages').
  * @returns {Promise<string>} The correct API path.
@@ -401,10 +571,8 @@ async function getNotebookApiPath(notebookId, resourcePath) {
   if (notebookCache) {
     const notebook = notebookCache.find(nb => nb.id === notebookId);
     if (notebook) {
-      if (notebook._groupId) {
-        return `/groups/${notebook._groupId}/onenote/notebooks/${notebookId}/${resourcePath}`;
-      }
-      return `/me/onenote/notebooks/${notebookId}/${resourcePath}`;
+      const basePath = await getOnenoteBasePath(notebook);
+      return `${basePath}/notebooks/${notebookId}/${resourcePath}`;
     }
   }
   
@@ -419,8 +587,9 @@ async function getNotebookApiPath(notebookId, resourcePath) {
       await refreshNotebookCache();
     }
     const notebook = notebookCache?.find(nb => nb.id === notebookId);
-    if (notebook && notebook._groupId) {
-      return `/groups/${notebook._groupId}/onenote/notebooks/${notebookId}/${resourcePath}`;
+    if (notebook) {
+      const basePath = await getOnenoteBasePath(notebook);
+      return `${basePath}/notebooks/${notebookId}/${resourcePath}`;
     }
     throw new Error(`Notebook ${notebookId} not found in personal or team notebooks. Error: ${error.message}`);
   }
@@ -867,6 +1036,9 @@ server.tool(
       const apiPath = await getNotebookApiPath(notebookId, 'sections');
       const sections = await paginateGraphRequest(apiPath);
       
+      // Register section→notebook mappings for later page routing
+      sections.forEach(s => registerSectionMapping(s.id, notebookId));
+      
       if (sections.length > 0) {
         const sectionList = sections.map((section, i) => `${i + 1}. **${section.displayName}**\n   ID: ${section.id}\n   Created: ${new Date(section.createdDateTime).toLocaleDateString()}`).join('\n\n');
         return { content: [{ type: 'text', text: `📂 **Sections in Notebook** (${sections.length} found):\n\n${sectionList}` }] };
@@ -892,7 +1064,8 @@ server.tool(
       const orderField = orderBy === 'created' ? 'createdDateTime' : 'lastModifiedDateTime';
       console.error(`Fetching pages from section ID: ${sectionId} (top: ${top}, orderBy: ${orderField})`);
       
-      const apiPath = `/me/onenote/sections/${sectionId}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=${top}&$orderby=${orderField} desc`;
+      const basePath = await getBasePathForSection(sectionId);
+      const apiPath = `${basePath}/sections/${sectionId}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=${top}&$orderby=${orderField} desc`;
       const pages = await paginateGraphRequest(apiPath);
       
       if (pages.length > 0) {
@@ -914,42 +1087,63 @@ server.tool(
     query: z.string().describe('Search term for page titles.').optional(),
     notebookId: z.string().describe('Optional: limit search to specific notebook ID.').optional(),
     notebookName: z.string().describe('Optional: limit search to notebook by name (case-insensitive partial match).').optional(),
+    includeTeamNotebooks: z.boolean().default(false).describe('Include notebooks from Microsoft Teams you have joined.').optional(),
     top: z.number().min(1).max(100).default(100).describe('Max pages per section to fetch (default: 100, max: 100).').optional(),
     orderBy: z.enum(['created', 'modified', 'title']).default('modified').describe('Sort order: "created", "modified" (default), or "title".').optional(),
     maxResults: z.number().min(1).max(200).default(50).describe('Max total results to return (default: 50).').optional()
   },
-  async ({ query, notebookId, notebookName, top = 100, orderBy = 'modified', maxResults = 50 }) => {
+  async ({ query, notebookId, notebookName, includeTeamNotebooks = false, top = 100, orderBy = 'modified', maxResults = 50 }) => {
     try {
       await ensureGraphClient();
-      console.error(`Searching pages (top: ${top}, orderBy: ${orderBy})...`);
+      console.error(`Searching pages (top: ${top}, orderBy: ${orderBy}, includeTeam: ${includeTeamNotebooks})...`);
       
-      // Determine notebooks to search
+      // Determine notebooks to search — use cache for team notebook support
       let notebooks = [];
       if (notebookId) {
-        // Search specific notebook by ID
-        try {
-          const nb = await graphClient.api(`/me/onenote/notebooks/${notebookId}`).get();
-          notebooks = [nb];
-        } catch (error) {
-          return { isError: true, content: [{ type: 'text', text: `Notebook ID "${notebookId}" not found. Use listNotebooks to get valid IDs.` }] };
+        // Search specific notebook by ID — check cache first (includes team notebooks)
+        if (!notebookCache) {
+          await refreshNotebookCache(includeTeamNotebooks);
+        }
+        const cachedNotebook = notebookCache?.find(nb => nb.id === notebookId);
+        if (cachedNotebook) {
+          notebooks = [cachedNotebook];
+        } else {
+          // Try personal endpoint as fallback
+          try {
+            const nb = await graphClient.api(`/me/onenote/notebooks/${notebookId}`).get();
+            notebooks = [{ ...nb, _isPersonal: true, _groupId: null }];
+          } catch (error) {
+            return { isError: true, content: [{ type: 'text', text: `Notebook ID "${notebookId}" not found. Use listNotebooks (with includeTeamNotebooks: true for team notebooks) to get valid IDs.` }] };
+          }
         }
       } else if (notebookName) {
-        // Search by name (partial match, case-insensitive)
-        const allNotebooks = await graphClient.api('/me/onenote/notebooks').get();
+        // Search by name — use cache to include team notebooks
+        if (!notebookCache) {
+          await refreshNotebookCache(includeTeamNotebooks);
+        }
+        let allNotebooks = notebookCache || [];
+        if (!includeTeamNotebooks) {
+          allNotebooks = allNotebooks.filter(nb => nb._isPersonal);
+        }
         const searchName = notebookName.toLowerCase();
-        notebooks = (allNotebooks.value || []).filter(nb => {
+        notebooks = allNotebooks.filter(nb => {
           const name = (nb.displayName || nb.name || '').toLowerCase();
           return name.includes(searchName);
         });
         
         if (notebooks.length === 0) {
-          return { content: [{ type: 'text', text: `🔍 No notebooks found matching "${notebookName}".` }] };
+          return { content: [{ type: 'text', text: `🔍 No notebooks found matching "${notebookName}".${!includeTeamNotebooks ? ' Try setting includeTeamNotebooks: true to search team notebooks.' : ''}` }] };
         }
         console.error(`Found ${notebooks.length} notebook(s) matching "${notebookName}"`);
       } else {
         // Search all notebooks
-        const notebooksResponse = await graphClient.api('/me/onenote/notebooks').get();
-        notebooks = notebooksResponse.value || [];
+        if (!notebookCache) {
+          await refreshNotebookCache(includeTeamNotebooks);
+        }
+        notebooks = notebookCache || [];
+        if (!includeTeamNotebooks) {
+          notebooks = notebooks.filter(nb => nb._isPersonal);
+        }
       }
       
       if (notebooks.length === 0) {
@@ -962,14 +1156,18 @@ server.tool(
       let allPages = [];
       let sectionsSearched = 0;
       
-      // Iterate through notebooks and query sections with optimization
+      // Iterate through notebooks and query sections with correct endpoint routing
       for (const notebook of notebooks) {
-        const sections = await paginateGraphRequest(`/me/onenote/notebooks/${notebook.id}/sections`);
+        const basePath = await getOnenoteBasePath(notebook);
+        const sections = await paginateGraphRequest(`${basePath}/notebooks/${notebook.id}/sections`);
         sectionsSearched += sections.length;
+        
+        // Register section mappings for later page routing
+        sections.forEach(s => registerSectionMapping(s.id, notebook.id));
         
         const pages = await queryAllSectionsParallel(sections, async (section) => {
           // Use $orderby and $top for server-side optimization
-          const apiPath = `/me/onenote/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=${top}&$orderby=${orderByField} desc`;
+          const apiPath = `${basePath}/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=${top}&$orderby=${orderByField} desc`;
           return await paginateGraphRequest(apiPath);
         });
         
@@ -1089,10 +1287,9 @@ server.tool(
       
       // Iterate through notebooks and query sections in parallel
       for (const notebook of notebooks) {
-        // Get correct API path for this notebook (personal or team)
-        const sectionsPath = notebook._groupId 
-          ? `/groups/${notebook._groupId}/onenote/notebooks/${notebook.id}/sections`
-          : `/me/onenote/notebooks/${notebook.id}/sections`;
+        // Get correct API base path for this notebook (personal, site, or group)
+        const basePath = await getOnenoteBasePath(notebook);
+        const sectionsPath = `${basePath}/notebooks/${notebook.id}/sections`;
         
         let sections = [];
         try {
@@ -1104,17 +1301,20 @@ server.tool(
         
         totalSectionsChecked += sections.length;
         
+        // Register section mappings for later page routing
+        sections.forEach(s => registerSectionMapping(s.id, notebook.id));
+        
         // Calculate reasonable top limit based on days (estimate ~10 pages per day, max 100)
         const topLimit = Math.min(100, Math.max(20, days * 10));
         
-        // Query all sections in parallel with optimized query
+        // Query all sections in parallel with optimized query — use same basePath for pages
         const pages = await queryAllSectionsParallel(sections, async (section) => {
           // Use $orderby and $top for efficient server-side filtering
           let sectionPages = [];
           try {
             const response = await retryWithBackoff(() => 
               graphClient
-                .api(`/me/onenote/sections/${section.id}/pages`)
+                .api(`${basePath}/sections/${section.id}/pages`)
                 .orderby('lastModifiedDateTime desc')
                 .top(topLimit)
                 .get()
@@ -1234,24 +1434,35 @@ server.tool(
       
       let notebooks = [];
       if (notebookId) {
-        const nb = await graphClient.api(`/me/onenote/notebooks/${notebookId}`).get();
-        notebooks = [nb];
+        // Check cache first for team notebook support
+        if (!notebookCache) await refreshNotebookCache();
+        const cachedNb = notebookCache?.find(nb => nb.id === notebookId);
+        if (cachedNb) {
+          notebooks = [cachedNb];
+        } else {
+          const nb = await graphClient.api(`/me/onenote/notebooks/${notebookId}`).get();
+          notebooks = [{ ...nb, _isPersonal: true, _groupId: null }];
+        }
       } else {
-        const response = await graphClient.api('/me/onenote/notebooks').get();
-        notebooks = response.value || [];
+        if (!notebookCache) await refreshNotebookCache();
+        notebooks = (notebookCache || []).filter(nb => nb._isPersonal);
       }
       
       let matchingPages = [];
       let pagesSearched = 0;
       
       for (const notebook of notebooks) {
-        const sections = await paginateGraphRequest(`/me/onenote/notebooks/${notebook.id}/sections`);
+        const basePath = await getOnenoteBasePath(notebook);
+        const sections = await paginateGraphRequest(`${basePath}/notebooks/${notebook.id}/sections`);
+        
+        // Register section mappings
+        sections.forEach(s => registerSectionMapping(s.id, notebook.id));
         
         for (const section of sections) {
           if (matchingPages.length >= maxPages) break;
           
           try {
-            const apiPath = `/me/onenote/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=20`;
+            const apiPath = `${basePath}/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=20`;
             const pages = await paginateGraphRequest(apiPath);
             
             for (const page of pages) {
@@ -1267,7 +1478,7 @@ server.tool(
               
               // Fetch and search content
               try {
-                const htmlContent = await fetchPageContentAdvanced(page.id, 'httpDirect');
+                const htmlContent = await fetchPageContentAdvanced(page.id, 'httpDirect', basePath);
                 const textContent = extractReadableText(htmlContent).toLowerCase();
                 
                 if (textContent.includes(searchTerm)) {
@@ -1411,10 +1622,9 @@ server.tool(
       let recentPages = [];
       
       for (const notebook of notebooks) {
-        // Get correct API path for this notebook (personal or team)
-        const apiPath = notebook._groupId 
-          ? `/groups/${notebook._groupId}/onenote/notebooks/${notebook.id}/sections`
-          : `/me/onenote/notebooks/${notebook.id}/sections`;
+        // Get correct API base path for this notebook (personal, site, or group)
+        const basePath = await getOnenoteBasePath(notebook);
+        const apiPath = `${basePath}/notebooks/${notebook.id}/sections`;
         
         let sections = [];
         try {
@@ -1424,19 +1634,20 @@ server.tool(
           continue; // Skip this notebook if we can't access it
         }
         
+        // Register section mappings for later page routing
+        sections.forEach(s => registerSectionMapping(s.id, notebook.id));
+        
         // Calculate reasonable top limit based on days (estimate ~10 pages per day, max 100)
         const daysCount = days || (sinceDate ? Math.ceil((Date.now() - threshold.getTime()) / (24 * 60 * 60 * 1000)) : 3);
         const topLimit = Math.min(100, Math.max(20, daysCount * 10));
         
-        // Query all sections in parallel with optimized query
+        // Query all sections in parallel with optimized query — use same basePath
         const pages = await queryAllSectionsParallel(sections, async (section) => {
-          // Use $orderby and $top for efficient server-side filtering
-          // This fetches only the most recently modified pages instead of ALL pages
           let sectionPages = [];
           try {
             const response = await retryWithBackoff(() => 
               graphClient
-                .api(`/me/onenote/sections/${section.id}/pages`)
+                .api(`${basePath}/sections/${section.id}/pages`)
                 .orderby('lastModifiedDateTime desc')
                 .top(topLimit)
                 .get()
@@ -1538,18 +1749,24 @@ server.tool(
       
       console.error(`Creating daily note "${pageTitle}" in ${notebookName}/${sectionName}...`);
       
-      // Find the notebook
-      const notebooks = await graphClient.api('/me/onenote/notebooks').get();
-      const notebook = (notebooks.value || []).find(nb => 
-        nb.displayName?.toLowerCase() === notebookName.toLowerCase()
+      // Find the notebook — use cache to support team notebooks
+      if (!notebookCache) await refreshNotebookCache();
+      const allNotebooks = notebookCache || [];
+      const notebook = allNotebooks.find(nb => 
+        (nb.displayName || nb.name || '').toLowerCase() === notebookName.toLowerCase()
       );
       
       if (!notebook) {
-        return { isError: true, content: [{ type: 'text', text: `❌ Notebook "${notebookName}" not found. Available notebooks:\n${(notebooks.value || []).map(nb => `  - ${nb.displayName}`).join('\n')}` }] };
+        return { isError: true, content: [{ type: 'text', text: `❌ Notebook "${notebookName}" not found. Available notebooks:\n${allNotebooks.map(nb => `  - ${nb.displayName || nb.name}`).join('\n')}` }] };
       }
       
-      // Find the section
-      const sections = await paginateGraphRequest(`/me/onenote/notebooks/${notebook.id}/sections`);
+      // Find the section using correct endpoint
+      const basePath = await getOnenoteBasePath(notebook);
+      const sections = await paginateGraphRequest(`${basePath}/notebooks/${notebook.id}/sections`);
+      
+      // Register section mappings
+      sections.forEach(s => registerSectionMapping(s.id, notebook.id));
+      
       const section = sections.find(s => 
         s.displayName?.toLowerCase() === sectionName.toLowerCase()
       );
@@ -1559,7 +1776,7 @@ server.tool(
       }
       
       // Check if page already exists
-      const existingPages = await paginateGraphRequest(`/me/onenote/sections/${section.id}/pages?$select=id,title`);
+      const existingPages = await paginateGraphRequest(`${basePath}/sections/${section.id}/pages?$select=id,title`);
       const existingPage = existingPages.find(p => p.title === pageTitle);
       
       if (existingPage) {
@@ -1583,7 +1800,7 @@ server.tool(
 </html>`;
       
       const response = await graphClient
-        .api(`/me/onenote/sections/${section.id}/pages`)
+        .api(`${basePath}/sections/${section.id}/pages`)
         .header('Content-Type', 'application/xhtml+xml')
         .post(pageHtml);
       
@@ -1646,13 +1863,19 @@ server.tool(
         return { content: [{ type: 'text', text: `📂 No sections found in notebook "${notebook.displayName || notebook.name}".` }] };
       }
       
+      // Register section mappings for later page routing
+      sections.forEach(s => registerSectionMapping(s.id, notebookId));
+      
       console.error(`Found ${sections.length} section(s), searching pages...`);
       const threshold = days ? new Date(Date.now() - days * 24 * 60 * 60 * 1000) : null;
       
+      // Get base path for this notebook for page queries
+      const basePath = await getBasePathForNotebook(notebookId);
+      
       // Query all sections in parallel
       const allMatchingPages = await queryAllSectionsParallel(sections, async (section) => {
-        const apiPath = `/me/onenote/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=${top}`;
-        const pages = await paginateGraphRequest(apiPath);
+        const sectionApiPath = `${basePath}/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=${top}`;
+        const pages = await paginateGraphRequest(sectionApiPath);
         
         const matchingPages = pages.filter(page => {
           // Date filter if specified
@@ -1727,8 +1950,9 @@ server.tool(
   async ({ pageId, format }) => {
     try {
       await ensureGraphClient();
-      const pageInfo = await graphClient.api(`/me/onenote/pages/${pageId}`).get();
-      const htmlContent = await fetchPageContentAdvanced(pageId, 'httpDirect');
+      const basePath = await getBasePathForPage(pageId);
+      const pageInfo = await graphClient.api(`${basePath}/pages/${pageId}`).get();
+      const htmlContent = await fetchPageContentAdvanced(pageId, 'httpDirect', basePath);
       const webUrl = pageInfo.links?.oneNoteWebUrl?.href || '';
       let resultText = '';
 
@@ -1762,6 +1986,7 @@ server.tool(
       await ensureGraphClient();
       const searchTerm = title.toLowerCase();
       let matchingPage = null;
+      let foundBasePath = '/me/onenote';
 
       // Strategy 1: Use flat /me/onenote/pages endpoint with OData filter (single API call)
       try {
@@ -1770,6 +1995,7 @@ server.tool(
         const results = searchResponse.value || [];
         if (results.length > 0) {
           matchingPage = results[0];
+          foundBasePath = '/me/onenote';
           console.error(`Found page via OData filter: "${matchingPage.title}"`);
         }
       } catch (filterError) {
@@ -1791,7 +2017,6 @@ server.tool(
 
           if (!matchingPage) {
             nextLink = response['@odata.nextLink'] || null;
-            // Cap at 500 pages to avoid excessive API calls
             if (pagesScanned >= 500) {
               console.error(`Scanned ${pagesScanned} pages without finding a match, stopping.`);
               break;
@@ -1799,15 +2024,45 @@ server.tool(
           }
         }
         if (matchingPage) {
+          foundBasePath = '/me/onenote';
           console.error(`Found page via flat scan after ${pagesScanned} pages: "${matchingPage.title}"`);
         }
       }
 
-      if (!matchingPage) {
-        return { isError: true, content: [{ type: 'text', text: `❌ No page found with title containing "${title}".` }] };
+      // Strategy 3: Search team notebook pages via site endpoints
+      if (!matchingPage && notebookCache) {
+        const teamNotebooks = notebookCache.filter(nb => !nb._isPersonal);
+        console.error(`Searching ${teamNotebooks.length} team notebooks for page titled "${title}"...`);
+        for (const notebook of teamNotebooks) {
+          if (matchingPage) break;
+          try {
+            const basePath = await getOnenoteBasePath(notebook);
+            if (basePath === '/me/onenote') continue; // already searched
+            const sections = await paginateGraphRequest(`${basePath}/notebooks/${notebook.id}/sections`);
+            sections.forEach(s => registerSectionMapping(s.id, notebook.id));
+            for (const section of sections) {
+              if (matchingPage) break;
+              const pages = await paginateGraphRequest(
+                `${basePath}/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=50`
+              );
+              const found = pages.find(p => p.title && p.title.toLowerCase().includes(searchTerm));
+              if (found) {
+                matchingPage = found;
+                foundBasePath = basePath;
+                console.error(`Found page in team notebook "${notebook.displayName}": "${found.title}"`);
+              }
+            }
+          } catch (err) {
+            console.error(`Error searching team notebook ${notebook.displayName}: ${err.message}`);
+          }
+        }
       }
 
-      const htmlContent = await fetchPageContentAdvanced(matchingPage.id, 'httpDirect');
+      if (!matchingPage) {
+        return { isError: true, content: [{ type: 'text', text: `❌ No page found with title containing "${title}". Try using listNotebooks with includeTeamNotebooks: true first to load team notebook cache.` }] };
+      }
+
+      const htmlContent = await fetchPageContentAdvanced(matchingPage.id, 'httpDirect', foundBasePath);
       const webUrl = matchingPage.links?.oneNoteWebUrl?.href || '';
       let resultText = '';
       if (format === 'html') {
@@ -1841,7 +2096,8 @@ server.tool(
   async ({ pageId, content: newContent, preserveTitle }) => {
     try {
       await ensureGraphClient();
-      const pageInfo = await graphClient.api(`/me/onenote/pages/${pageId}`).get();
+      const basePath = await getBasePathForPage(pageId);
+      const pageInfo = await graphClient.api(`${basePath}/pages/${pageId}`).get();
       console.error(`Updating content for page: "${pageInfo.title}" (ID: ${pageId})`);
       
       const htmlContentForUpdate = textToHtml(newContent);
@@ -1854,7 +2110,7 @@ server.tool(
         </div>
       `;
       
-      const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${pageId}/content`;
+      const url = `https://graph.microsoft.com/v1.0${basePath}/pages/${pageId}/content`;
       const response = await fetch(url, {
         method: 'PATCH',
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
@@ -1882,7 +2138,8 @@ server.tool(
   async ({ pageId, content: newContent, addTimestamp, addSeparator }) => {
     try {
       await ensureGraphClient();
-      const pageInfo = await graphClient.api(`/me/onenote/pages/${pageId}`).get();
+      const basePath = await getBasePathForPage(pageId);
+      const pageInfo = await graphClient.api(`${basePath}/pages/${pageId}`).get();
       console.error(`Appending content to page: "${pageInfo.title}" (ID: ${pageId})`);
       
       const htmlContentToAppend = textToHtml(newContent);
@@ -1891,7 +2148,7 @@ server.tool(
       if (addTimestamp) appendHtml += `<p><em>Added on ${new Date().toLocaleString()}</em></p>`;
       appendHtml += htmlContentToAppend;
       
-      const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${pageId}/content`;
+      const url = `https://graph.microsoft.com/v1.0${basePath}/pages/${pageId}/content`;
       const response = await fetch(url, {
         method: 'PATCH',
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
@@ -1917,11 +2174,12 @@ server.tool(
   async ({ pageId, newTitle }) => {
     try {
       await ensureGraphClient();
-      const pageInfo = await graphClient.api(`/me/onenote/pages/${pageId}`).get();
+      const basePath = await getBasePathForPage(pageId);
+      const pageInfo = await graphClient.api(`${basePath}/pages/${pageId}`).get();
       const oldTitle = pageInfo.title;
       console.error(`Updating page title from "${oldTitle}" to "${newTitle}" for page ID "${pageId}"`);
       
-      const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${pageId}/content`;
+      const url = `https://graph.microsoft.com/v1.0${basePath}/pages/${pageId}/content`;
       const response = await fetch(url, {
         method: 'PATCH',
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
@@ -1949,8 +2207,9 @@ server.tool(
   async ({ pageId, findText, replaceText, caseSensitive }) => {
     try {
       await ensureGraphClient();
-      const pageInfo = await graphClient.api(`/me/onenote/pages/${pageId}`).get();
-      const htmlContent = await fetchPageContentAdvanced(pageId, 'httpDirect');
+      const basePath = await getBasePathForPage(pageId);
+      const pageInfo = await graphClient.api(`${basePath}/pages/${pageId}`).get();
+      const htmlContent = await fetchPageContentAdvanced(pageId, 'httpDirect', basePath);
       console.error(`Replacing text in page: "${pageInfo.title}" (ID: ${pageId})`);
       
       const flags = caseSensitive ? 'g' : 'gi';
@@ -1962,7 +2221,7 @@ server.tool(
       }
       
       const updatedContent = htmlContent.replace(regex, replaceText);
-      const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${pageId}/content`;
+      const url = `https://graph.microsoft.com/v1.0${basePath}/pages/${pageId}/content`;
       const response = await fetch(url, {
         method: 'PATCH',
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
@@ -1996,7 +2255,8 @@ server.tool(
   async ({ pageId, note, noteType, position }) => {
     try {
       await ensureGraphClient();
-      const pageInfo = await graphClient.api(`/me/onenote/pages/${pageId}`).get();
+      const basePath = await getBasePathForPage(pageId);
+      const pageInfo = await graphClient.api(`${basePath}/pages/${pageId}`).get();
       console.error(`Adding ${noteType} to page: "${pageInfo.title}" (ID: ${pageId}) at ${position}`);
       
       const icons = { note: '📝', todo: '✅', important: '🚨', question: '❓' };
@@ -2008,7 +2268,7 @@ server.tool(
         </div>`;
       
       const action = position === 'top' ? 'prepend' : 'append';
-      const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${pageId}/content`;
+      const url = `https://graph.microsoft.com/v1.0${basePath}/pages/${pageId}/content`;
       const response = await fetch(url, {
         method: 'PATCH',
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
@@ -2039,7 +2299,8 @@ server.tool(
   async ({ pageId, tableData, title, position }) => {
     try {
       await ensureGraphClient();
-      const pageInfo = await graphClient.api(`/me/onenote/pages/${pageId}`).get();
+      const basePath = await getBasePathForPage(pageId);
+      const pageInfo = await graphClient.api(`${basePath}/pages/${pageId}`).get();
       console.error(`Adding table to page: "${pageInfo.title}" (ID: ${pageId}) at ${position}`);
       
       const rows = tableData.trim().split('\n').map(row => row.split(',').map(cell => cell.trim()));
@@ -2051,7 +2312,7 @@ server.tool(
       tableHtml += `<table style="border-collapse: collapse; width: 100%; margin: 10px 0;"><thead><tr style="background-color: #f5f5f5;">${headerRow.map(cell => `<th style="border: 1px solid #ddd; padding: 8px; text-align: left;">${textToHtml(cell)}</th>`).join('')}</tr></thead><tbody>${dataRows.map(row => `<tr>${row.map(cell => `<td style="border: 1px solid #ddd; padding: 8px;">${textToHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
       
       const action = position === 'top' ? 'prepend' : 'append';
-      const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${pageId}/content`;
+      const url = `https://graph.microsoft.com/v1.0${basePath}/pages/${pageId}/content`;
       const response = await fetch(url, {
         method: 'PATCH',
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
@@ -2086,6 +2347,7 @@ server.tool(
       }
       const targetSectionId = sectionsResponse.value[0].id;
       const targetSectionName = sectionsResponse.value[0].displayName;
+      const basePath = await getBasePathForSection(targetSectionId);
       
       const htmlContent = textToHtml(content);
       const pageHtml = `<!DOCTYPE html>
@@ -2103,7 +2365,7 @@ server.tool(
 </html>`;
       
       const response = await graphClient
-        .api(`/me/onenote/sections/${targetSectionId}/pages`)
+        .api(`${basePath}/sections/${targetSectionId}/pages`)
         .header('Content-Type', 'application/xhtml+xml')
         .post(pageHtml);
       
