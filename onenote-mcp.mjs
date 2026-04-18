@@ -301,6 +301,34 @@ async function queryAllSectionsParallel(sections, queryFn, concurrency = 5) {
 }
 
 /**
+ * Searches sections in parallel for a page matching a title, with early exit.
+ * @param {Array} sections - Array of section objects to search.
+ * @param {string} searchTerm - Lowercase title substring to match.
+ * @param {number} [concurrency=5] - Number of concurrent requests.
+ * @returns {Promise<object|null>} The first matching page, or null.
+ */
+async function findPageInSectionsParallel(sections, searchTerm, concurrency = 5) {
+  for (let i = 0; i < sections.length; i += concurrency) {
+    const batch = sections.slice(i, i + concurrency);
+    const batchResults = await Promise.allSettled(
+      batch.map(async (section) => {
+        const pages = await paginateGraphRequest(
+          `/me/onenote/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=50`
+        );
+        return pages.find(p => p.title && p.title.toLowerCase().includes(searchTerm));
+      })
+    );
+
+    for (const result of batchResults) {
+      if (result.status === 'fulfilled' && result.value) {
+        return result.value;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Fetches the content of a OneNote page.
  * @param {string} pageId - The ID of the page.
  * @param {'httpDirect' | 'direct'} [method='httpDirect'] - The method to use for fetching.
@@ -1724,35 +1752,58 @@ server.tool(
   async ({ title, format }) => {
     try {
       await ensureGraphClient();
-      
-      // Get all notebooks
-      const notebooksResponse = await graphClient.api('/me/onenote/notebooks').get();
-      const notebooks = notebooksResponse.value || [];
-      
-      if (notebooks.length === 0) {
-        return { isError: true, content: [{ type: 'text', text: '📚 No notebooks found.' }] };
-      }
-      
-      let allPages = [];
-      // Iterate through notebooks and sections to get all pages
-      for (const notebook of notebooks) {
-        const sections = await paginateGraphRequest(`/me/onenote/notebooks/${notebook.id}/sections`);
-        
-        for (const section of sections) {
-          try {
-            const pages = await paginateGraphRequest(`/me/onenote/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime,links`);
-            allPages = allPages.concat(pages);
-          } catch (err) {
-            console.error(`Error fetching pages from section ${section.id}: ${err.message}`);
-          }
+      const searchTerm = title.toLowerCase();
+      let matchingPage = null;
+
+      // Strategy 1: Use Graph OData filter to search by title (single API call)
+      try {
+        const filterQuery = `/me/onenote/pages?$filter=contains(tolower(title),'${searchTerm.replace(/'/g, "''")}')&$select=id,title,createdDateTime,lastModifiedDateTime,links&$top=1&$orderby=lastModifiedDateTime desc`;
+        const searchResponse = await graphClient.api(filterQuery).get();
+        const results = searchResponse.value || [];
+        if (results.length > 0) {
+          matchingPage = results[0];
+          console.error(`Found page via OData filter: "${matchingPage.title}"`);
         }
+      } catch (filterError) {
+        console.error(`OData filter not supported, falling back to cached search: ${filterError.message}`);
       }
-      
-      const matchingPage = allPages.find(p => p.title && p.title.toLowerCase().includes(title.toLowerCase()));
+
+      // Strategy 2: Use notebook cache + parallel section queries with early exit
+      if (!matchingPage) {
+        if (!notebookCache) {
+          await refreshNotebookCache(true);
+        }
+        const notebooks = notebookCache || [];
+
+        if (notebooks.length === 0) {
+          return { isError: true, content: [{ type: 'text', text: '📚 No notebooks found.' }] };
+        }
+
+        // Collect all sections from all notebooks in parallel
+        const sectionResults = await Promise.allSettled(
+          notebooks.map(async (notebook) => {
+            const sectionsPath = notebook._groupId
+              ? `/groups/${notebook._groupId}/onenote/notebooks/${notebook.id}/sections`
+              : `/me/onenote/notebooks/${notebook.id}/sections`;
+            try {
+              return await paginateGraphRequest(sectionsPath);
+            } catch (err) {
+              console.error(`Error fetching sections for notebook ${notebook.displayName}: ${err.message}`);
+              return [];
+            }
+          })
+        );
+
+        const allSections = sectionResults
+          .filter(r => r.status === 'fulfilled')
+          .flatMap(r => r.value);
+
+        // Query sections in parallel, stop as soon as we find a match
+        matchingPage = await findPageInSectionsParallel(allSections, searchTerm);
+      }
 
       if (!matchingPage) {
-        const availablePages = allPages.slice(0, 10).map(p => `- ${p.title}`).join('\n');
-        return { isError: true, content: [{ type: 'text', text: `❌ No page found with title containing "${title}".\n\nAvailable pages (up to 10):\n${availablePages || 'None'}` }] };
+        return { isError: true, content: [{ type: 'text', text: `❌ No page found with title containing "${title}".` }] };
       }
 
       const htmlContent = await fetchPageContentAdvanced(matchingPage.id, 'httpDirect');
