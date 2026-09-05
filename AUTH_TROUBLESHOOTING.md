@@ -247,6 +247,8 @@ you are a **member** of. A notebook on a SharePoint site you have read access to
 not joined is in neither, so the server cannot find it however many times you re-auth.
 
 Set `ONENOTE_EXTRA_SITES` to that site's URL (see the ReadMe's Configuration section).
+Its notebooks are then listed and searched by default — `includeTeamNotebooks: true` is
+not required for them.
 
 ### Issue: Graph API returns 403 Forbidden
 

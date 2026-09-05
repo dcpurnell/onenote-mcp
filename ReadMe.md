@@ -25,6 +25,8 @@ page manipulation.
 - ✅ **`ONENOTE_EXTRA_SITES`** — point the server at SharePoint sites you can read but are
   not a member of. Their notebooks are returned by neither `/me/onenote/notebooks` nor
   `/me/joinedTeams`, so there was previously no way to reach them.
+- ✅ **Extra-site notebooks are in scope by default** — no `includeTeamNotebooks: true`
+  required. You named the site explicitly; that is the opt-in.
 
 ## 📦 Earlier Updates (February 2026)
 
@@ -172,6 +174,10 @@ page manipulation.
    look. Sites that cannot be resolved are skipped without failing the rest of
    the notebook listing.
 
+   Notebooks from these sites are returned by `listNotebooks` and the search
+   tools **without** needing `includeTeamNotebooks: true` — you configured them
+   explicitly, so they are treated as in scope by default.
+
 3. **`.gitignore`:**
 
    The project includes a `.gitignore` file. Ensure it contains at least the following to prevent committing sensitive files:
@@ -266,6 +272,8 @@ This server exposes the following tools to your AI assistant:
   - Note: Does not include personally shared notebooks from OneDrive due to Microsoft API limitations.
   - **NEW:** Results are cached for 5 minutes for better performance
   - **NEW:** Team notebooks show which team they belong to
+  - Notebooks from sites listed in `ONENOTE_EXTRA_SITES` are always included, whether or
+    not `includeTeamNotebooks` is set.
 - `listSections`: Lists all sections in a specific notebook. (Args: `notebookId` (string))
   - **FIXED:** Now works with team notebook IDs!
 - `listPagesInSection`: Lists pages in a specific section with pagination support. (Args: `sectionId` (string), `top` (number, optional, max 100), `orderBy` (enum: "created", "modified", optional))

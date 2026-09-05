@@ -445,6 +445,25 @@ async function resolveSiteId(siteUrl) {
 }
 
 /**
+ * Whether a notebook belongs to the default scope — the set returned when the
+ * caller has NOT asked for team notebooks.
+ *
+ * Personal notebooks are always in scope. So are extra-site notebooks: they
+ * exist only because the operator named that site in ONENOTE_EXTRA_SITES, so
+ * they are opt-in already, and unlike joined teams they cost one cheap lookup
+ * rather than a fan-out over every group. They are tagged _isPersonal: false
+ * because they are site-hosted and must route through /sites/{id}/onenote, so
+ * a bare _isPersonal check silently dropped them and a deliberately configured
+ * notebook reported as "No notebooks found".
+ *
+ * @param {object} nb - A notebook cache entry.
+ * @returns {boolean} True if the notebook is in scope without includeTeamNotebooks.
+ */
+function isDefaultScopeNotebook(nb) {
+  return Boolean(nb._isPersonal || nb._isFromExtraSite);
+}
+
+/**
  * Returns the correct OneNote API base path for a notebook.
  * For personal notebooks: /me/onenote
  * For SharePoint-hosted team notebooks: /sites/{siteId}/onenote
@@ -963,7 +982,8 @@ async function refreshNotebookCache(includeTeams = true, personalOnly = false) {
     notebookCache = previousCache;
     console.error(`Skipping cache update: API returned 0 notebooks but existing cache has ${previousCache.length}`);
   }
-  console.error(`Notebook cache refreshed: ${allNotebooks.length} notebooks (${allNotebooks.filter(nb => nb._isPersonal).length} personal, ${allNotebooks.filter(nb => !nb._isPersonal).length} team)`);
+  const extraSiteCount = allNotebooks.filter(nb => nb._isFromExtraSite).length;
+  console.error(`Notebook cache refreshed: ${allNotebooks.length} notebooks (${allNotebooks.filter(nb => nb._isPersonal).length} personal, ${extraSiteCount} extra-site, ${allNotebooks.filter(nb => !nb._isPersonal && !nb._isFromExtraSite).length} team)`);
   
   return allNotebooks;
 }
@@ -1230,7 +1250,7 @@ server.tool(
       
       // Filter by team notebooks preference if cache includes both
       if (!includeTeamNotebooks) {
-        allNotebooks = allNotebooks.filter(nb => nb._isPersonal);
+        allNotebooks = allNotebooks.filter(isDefaultScopeNotebook);
       }
       
       if (allNotebooks.length > 0) {
@@ -1350,7 +1370,7 @@ server.tool(
         }
         let allNotebooks = notebookCache || [];
         if (!includeTeamNotebooks) {
-          allNotebooks = allNotebooks.filter(nb => nb._isPersonal);
+          allNotebooks = allNotebooks.filter(isDefaultScopeNotebook);
         }
         const searchName = notebookName.toLowerCase();
         notebooks = allNotebooks.filter(nb => {
@@ -1369,7 +1389,7 @@ server.tool(
         }
         notebooks = notebookCache || [];
         if (!includeTeamNotebooks) {
-          notebooks = notebooks.filter(nb => nb._isPersonal);
+          notebooks = notebooks.filter(isDefaultScopeNotebook);
         }
       }
       
@@ -1489,7 +1509,7 @@ server.tool(
       
       // Filter by personal/team preference
       if (!includeTeamNotebooks) {
-        notebooks = notebooks.filter(nb => nb._isPersonal);
+        notebooks = notebooks.filter(isDefaultScopeNotebook);
       }
       
       // Filter by notebook name if specified
@@ -1672,7 +1692,7 @@ server.tool(
         }
       } else {
         if (!notebookCache) await refreshNotebookCache();
-        notebooks = (notebookCache || []).filter(nb => nb._isPersonal);
+        notebooks = (notebookCache || []).filter(isDefaultScopeNotebook);
       }
       
       let matchingPages = [];
