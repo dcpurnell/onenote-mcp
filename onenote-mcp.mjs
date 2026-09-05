@@ -26,6 +26,13 @@ const clientId = process.env.AZURE_CLIENT_ID || '14d82eec-204b-4c2f-b7e8-296a70d
 // Updated scopes to include .All permissions for accessing shared/team notebooks
 const scopes = ['Notes.Read', 'Notes.ReadWrite', 'Notes.Read.All', 'Notes.ReadWrite.All', 'Notes.Create', 'User.Read'];
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+// Extra SharePoint sites to pull notebooks from, comma-separated site URLs.
+// Needed for notebooks on a site the user can READ but is not a MEMBER of:
+// /me/onenote/notebooks and /me/joinedTeams both omit those, so they are
+// undiscoverable and must be named explicitly.
+// e.g. ONENOTE_EXTRA_SITES="https://contoso.sharepoint.com/sites/TechnicalLeadership"
+const extraSiteUrls = (process.env.ONENOTE_EXTRA_SITES || '')
+  .split(',').map(u => u.trim()).filter(Boolean);
 
 // Register the persistent token cache plugin (backed by macOS Keychain) once,
 // before any credential is constructed, so refresh tokens survive process restarts.
@@ -33,6 +40,7 @@ useIdentityPlugin(cachePersistencePlugin);
 
 // --- Global State ---
 let accessToken = null;
+let accessTokenExpiresOn = null; // epoch ms for the current accessToken; null = unknown
 let graphClient = null;
 let notebookCache = null; // Cache of notebooks with group info
 let cacheTimestamp = null; // When cache was last updated
@@ -40,6 +48,7 @@ let teamNotebooksLoading = false; // Flag to prevent duplicate team loads
 let sectionToNotebookMap = {}; // Maps sectionId → notebookId for page→endpoint resolution
 let resolvedSiteIds = {}; // Cache of siteUrl → siteId to avoid re-resolving
 let sharedCredential = null; // Single DeviceCodeCredential instance, reused across calls
+let sharedCredentialHasRecord = false; // Whether sharedCredential was built with a persisted auth record
 let latestDeviceCodeInfo = null; // Set by userPromptCallback when interactive auth is needed
 
 // --- MCP Server Initialization ---
@@ -52,6 +61,38 @@ const server = new McpServer({
 // ============================================================================
 // AUTHENTICATION & MICROSOFT GRAPH CLIENT MANAGEMENT
 // ============================================================================
+
+/**
+ * Reads the `exp` claim straight out of a JWT access token.
+ * Trusting the token itself is more reliable than the sidecar file, which can
+ * be stale or in the old plain-text format.
+ * @param {string} tok
+ * @returns {number|null} Expiry in epoch ms, or null if undeterminable.
+ */
+function tokenExpiryFromJwt(tok) {
+  try {
+    const payload = JSON.parse(Buffer.from(tok.split('.')[1], 'base64url').toString());
+    return payload.exp ? payload.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Refresh this far ahead of the real expiry so in-flight calls do not race it. */
+const TOKEN_EXPIRY_SKEW_MS = 5 * 60 * 1000;
+
+/**
+ * True only if we hold a token that is present AND not about to expire.
+ * Entra access tokens live ~60-90 minutes, so presence alone is not enough:
+ * checking only `!accessToken` leaves a dead token in memory forever and every
+ * Graph call then 401s (which listNotebooks reports as "no notebooks found").
+ * @returns {boolean}
+ */
+function haveFreshToken() {
+  if (!accessToken) return false;
+  if (!accessTokenExpiresOn) return true; // unknown expiry: use it, a 401 will still surface
+  return Date.now() < accessTokenExpiresOn - TOKEN_EXPIRY_SKEW_MS;
+}
 
 /**
  * Loads an existing access token from the local file system.
@@ -67,6 +108,14 @@ function loadExistingToken() {
       } catch (parseError) {
         accessToken = tokenData; // Old format: plain token string
         console.error('Loaded existing token from file (plain text format).');
+      }
+      accessTokenExpiresOn = accessToken ? tokenExpiryFromJwt(accessToken) : null;
+      if (accessToken && accessTokenExpiresOn && Date.now() >= accessTokenExpiresOn) {
+        // Do not keep a dead token: it would satisfy `accessToken` truthiness
+        // and suppress every future silent-renewal attempt.
+        console.error('Token file holds an expired token; discarding so renewal can run.');
+        accessToken = null;
+        accessTokenExpiresOn = null;
       }
     }
   } catch (error) {
@@ -128,6 +177,8 @@ function saveAuthenticationRecord(record) {
  */
 function persistAccessTokenFile(tokenResponse) {
   try {
+    accessTokenExpiresOn = tokenResponse?.expiresOnTimestamp
+      ?? (accessToken ? tokenExpiryFromJwt(accessToken) : null);
     const tokenData = {
       token: accessToken,
       clientId,
@@ -151,13 +202,21 @@ function persistAccessTokenFile(tokenResponse) {
  * @returns {DeviceCodeCredential}
  */
 function getSharedCredential() {
+  // If the credential was built before a login completed (no auth record yet)
+  // but a record now exists on disk, rebuild so silent renewal can find the account.
+  if (sharedCredential && !sharedCredentialHasRecord && fs.existsSync(authRecordFilePath)) {
+    sharedCredential = null;
+  }
   if (!sharedCredential) {
     const existingRecord = loadAuthenticationRecord();
+    sharedCredentialHasRecord = Boolean(existingRecord);
     sharedCredential = new DeviceCodeCredential({
       clientId,
       tokenCachePersistenceOptions: {
         enabled: true,
-        name: 'onenote-mcp-token-cache'
+        name: 'onenote-mcp-token-cache',
+        // WSL/headless Linux has no keyring daemon; fall back to an on-disk cache
+        unsafeAllowUnencryptedStorage: true
       },
       disableAutomaticAuthentication: true,
       authenticationRecord: existingRecord,
@@ -199,14 +258,21 @@ async function trySilentToken() {
  * @returns {Promise<Client>} The initialized and authenticated Graph client.
  */
 async function ensureGraphClient() {
-  if (!accessToken) {
+  if (!haveFreshToken()) {
+    // Drop the stale token first so trySilentToken() is genuinely re-entered
+    // and a failure cannot leave an expired bearer in place.
+    accessToken = null;
+    accessTokenExpiresOn = null;
     const gotSilentToken = await trySilentToken();
     if (!gotSilentToken) {
       loadExistingToken();
     }
   }
-  if (!accessToken) {
-    throw new Error('No access token available. Please authenticate first using the "authenticate" tool.');
+  if (!haveFreshToken()) {
+    throw new Error(
+      'No valid access token available (missing or expired, and silent renewal failed). ' +
+      'Re-authenticate with: node ~/tools/onenote-mcp/auth-cli.mjs'
+    );
   }
   if (!graphClient) {
     initializeGraphClient();
@@ -376,6 +442,25 @@ async function resolveSiteId(siteUrl) {
   resolvedSiteIds[siteUrl] = siteId;
   console.error(`Resolved site ID for ${siteUrl}: ${siteId}`);
   return siteId;
+}
+
+/**
+ * Whether a notebook belongs to the default scope — the set returned when the
+ * caller has NOT asked for team notebooks.
+ *
+ * Personal notebooks are always in scope. So are extra-site notebooks: they
+ * exist only because the operator named that site in ONENOTE_EXTRA_SITES, so
+ * they are opt-in already, and unlike joined teams they cost one cheap lookup
+ * rather than a fan-out over every group. They are tagged _isPersonal: false
+ * because they are site-hosted and must route through /sites/{id}/onenote, so
+ * a bare _isPersonal check silently dropped them and a deliberately configured
+ * notebook reported as "No notebooks found".
+ *
+ * @param {object} nb - A notebook cache entry.
+ * @returns {boolean} True if the notebook is in scope without includeTeamNotebooks.
+ */
+function isDefaultScopeNotebook(nb) {
+  return Boolean(nb._isPersonal || nb._isFromExtraSite);
 }
 
 /**
@@ -755,6 +840,40 @@ function saveNotebookCacheToDisk() {
 }
 
 /**
+ * Fetches notebooks from explicitly-configured SharePoint sites (ONENOTE_EXTRA_SITES).
+ * Each is tagged with _siteId so getNotebookBasePath routes it via /sites/{id}/onenote.
+ * Failures are logged per-site and never abort the wider cache refresh.
+ * @returns {Promise<Array>} Notebook cache entries, possibly empty.
+ */
+async function fetchExtraSiteNotebooks() {
+  if (extraSiteUrls.length === 0) return [];
+  const results = await Promise.allSettled(extraSiteUrls.map(async (siteUrl) => {
+    const siteId = await resolveSiteId(siteUrl);
+    const response = await graphClient.api(`/sites/${siteId}/onenote/notebooks`).get();
+    const siteLabel = (parseSharePointUrl(siteUrl)?.sitePath || siteUrl).split('/').pop();
+    return (response.value || []).map(nb => ({
+      ...nb,
+      displayName: nb.displayName || nb.name || `${siteLabel} Notebook`,
+      _isPersonal: false,
+      _groupId: null,
+      _siteId: siteId,
+      _teamName: siteLabel,
+      _isFromExtraSite: true
+    }));
+  }));
+  results.forEach((r, i) => {
+    if (r.status === 'rejected') {
+      console.error(`Error fetching notebooks for extra site ${extraSiteUrls[i]}: ${r.reason?.message || r.reason}`);
+    }
+  });
+  const notebooks = results.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
+  if (notebooks.length > 0) {
+    console.error(`Loaded ${notebooks.length} notebook(s) from ${extraSiteUrls.length} configured extra site(s).`);
+  }
+  return notebooks;
+}
+
+/**
  * Refreshes the notebook cache with both personal and team notebooks.
  * Uses aggressive parallelization and progressive loading.
  * @param {boolean} includeTeams - Whether to include team notebooks.
@@ -776,6 +895,14 @@ async function refreshNotebookCache(includeTeams = true, personalOnly = false) {
       _teamName: null
     }));
     
+    // Explicitly-configured sites the user can read but is not a member of.
+    // Cheap (usually one site) and merged before the personalOnly early return
+    // so these notebooks are never missing from a fast path.
+    const extraSiteNotebooks = await fetchExtraSiteNotebooks();
+    if (extraSiteNotebooks.length > 0) {
+      allNotebooks = [...allNotebooks, ...extraSiteNotebooks];
+    }
+
     // Update cache with personal notebooks immediately
     notebookCache = allNotebooks;
     cacheTimestamp = Date.now();
@@ -855,7 +982,8 @@ async function refreshNotebookCache(includeTeams = true, personalOnly = false) {
     notebookCache = previousCache;
     console.error(`Skipping cache update: API returned 0 notebooks but existing cache has ${previousCache.length}`);
   }
-  console.error(`Notebook cache refreshed: ${allNotebooks.length} notebooks (${allNotebooks.filter(nb => nb._isPersonal).length} personal, ${allNotebooks.filter(nb => !nb._isPersonal).length} team)`);
+  const extraSiteCount = allNotebooks.filter(nb => nb._isFromExtraSite).length;
+  console.error(`Notebook cache refreshed: ${allNotebooks.length} notebooks (${allNotebooks.filter(nb => nb._isPersonal).length} personal, ${extraSiteCount} extra-site, ${allNotebooks.filter(nb => !nb._isPersonal && !nb._isFromExtraSite).length} team)`);
   
   return allNotebooks;
 }
@@ -907,9 +1035,11 @@ async function refreshTeamNotebooksBackground() {
       .filter(r => r.status === 'fulfilled')
       .flatMap(r => r.value);
     
-    // Merge with existing cache (keep personal notebooks)
+    // Merge with existing cache (keep personal AND configured extra-site notebooks —
+    // extra-site entries are not re-fetched here, so filtering them out would drop them)
     const personalNotebooks = notebookCache?.filter(nb => nb._isPersonal) || [];
-    notebookCache = [...personalNotebooks, ...teamNotebooks];
+    const extraSiteNotebooks = notebookCache?.filter(nb => nb._isFromExtraSite) || [];
+    notebookCache = [...personalNotebooks, ...extraSiteNotebooks, ...teamNotebooks];
     cacheTimestamp = Date.now();
     saveNotebookCacheToDisk();
     
@@ -1120,7 +1250,7 @@ server.tool(
       
       // Filter by team notebooks preference if cache includes both
       if (!includeTeamNotebooks) {
-        allNotebooks = allNotebooks.filter(nb => nb._isPersonal);
+        allNotebooks = allNotebooks.filter(isDefaultScopeNotebook);
       }
       
       if (allNotebooks.length > 0) {
@@ -1240,7 +1370,7 @@ server.tool(
         }
         let allNotebooks = notebookCache || [];
         if (!includeTeamNotebooks) {
-          allNotebooks = allNotebooks.filter(nb => nb._isPersonal);
+          allNotebooks = allNotebooks.filter(isDefaultScopeNotebook);
         }
         const searchName = notebookName.toLowerCase();
         notebooks = allNotebooks.filter(nb => {
@@ -1259,7 +1389,7 @@ server.tool(
         }
         notebooks = notebookCache || [];
         if (!includeTeamNotebooks) {
-          notebooks = notebooks.filter(nb => nb._isPersonal);
+          notebooks = notebooks.filter(isDefaultScopeNotebook);
         }
       }
       
@@ -1379,7 +1509,7 @@ server.tool(
       
       // Filter by personal/team preference
       if (!includeTeamNotebooks) {
-        notebooks = notebooks.filter(nb => nb._isPersonal);
+        notebooks = notebooks.filter(isDefaultScopeNotebook);
       }
       
       // Filter by notebook name if specified
@@ -1562,7 +1692,7 @@ server.tool(
         }
       } else {
         if (!notebookCache) await refreshNotebookCache();
-        notebooks = (notebookCache || []).filter(nb => nb._isPersonal);
+        notebooks = (notebookCache || []).filter(isDefaultScopeNotebook);
       }
       
       let matchingPages = [];

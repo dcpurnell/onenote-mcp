@@ -211,11 +211,19 @@ Go to **API permissions** and verify you have:
 
 ### Issue: "No notebooks found" even after re-authentication
 
+⚠ **This message is not evidence that the account is empty.** Notebook listing catches
+errors and falls through to an empty result, so an expired token, a revoked consent or a
+missing scope all present as the same benign-looking line. Rule out auth before believing
+it.
+
 **Possible causes:**
-1. ✅ Check scopes with `checkTokenScopes` - verify `.All` scopes are present
+1. ✅ Check scopes with `checkTokenScopes` - verify `.All` scopes are present, and check
+   the expiry it reports while you are there
 2. 🔄 Token cached - try deleting `.access-token.txt` and re-authenticate
 3. 📋 Actually no notebooks - verify in OneNote web/app that you have notebooks
 4. 🏢 Organizational policy - some enterprises restrict `.All` permissions
+5. 🔍 The notebook exists but is **undiscoverable** rather than inaccessible - see the next
+   issue
 
 ### Issue: "Admin consent required"
 
@@ -232,11 +240,21 @@ Go to **API permissions** and verify you have:
 - Check firewall/proxy isn't blocking Microsoft login
 - Try different browser or incognito mode
 
+### Issue: A notebook you can open in the browser never appears
+
+`/me/onenote/notebooks` returns your personal notebooks and `/me/joinedTeams` the groups
+you are a **member** of. A notebook on a SharePoint site you have read access to but have
+not joined is in neither, so the server cannot find it however many times you re-auth.
+
+Set `ONENOTE_EXTRA_SITES` to that site's URL (see the ReadMe's Configuration section).
+Its notebooks are then listed and searched by default — `includeTeamNotebooks: true` is
+not required for them.
+
 ### Issue: Graph API returns 403 Forbidden
 
 **Causes:**
 - Missing scopes (check with `checkTokenScopes`)
-- Token expired (tokens last ~1 hour, refresh by re-authenticating)
+- Token expired (access tokens last ~60-90 minutes; the server renews silently, so a persistent failure here means silent renewal is also failing)
 - Organizational policy blocking API access
 
 ---
@@ -284,7 +302,7 @@ If this works but MCP tool doesn't, it's a server issue. If this fails too, it's
 ## Security Notes
 
 - **Token Storage:** Tokens are stored in `.access-token.txt` - keep this file secure
-- **Token Expiration:** Tokens expire after ~1 hour; re-authenticate when needed
+- **Token Expiration:** Access tokens expire after ~60-90 minutes. The server checks the expiry before each call and renews silently from the cached refresh token, so this is normally invisible. Re-authenticate only when it tells you to.
 - **Scope Principle:** Only request permissions your app actually needs
 - **Production Use:** For production, consider using a proper secret management service and refresh tokens
 

@@ -12,7 +12,23 @@ This server provides a rich set of tools for advanced OneNote management,
 including robust text extraction, HTML content processing, and fine-grained
 page manipulation.
 
-## 🆕 Latest Updates (February 2026)
+## 🆕 Latest Updates (September 2026)
+
+**Access-token expiry is now handled, and notebooks on non-member SharePoint sites are reachable.**
+
+- ✅ **Access tokens are checked for expiry before use** — previously a loaded token was
+  reused forever, so after its ~60-90 minute lifetime every Graph call returned 401.
+  Silent renewal was available but never attempted.
+- ✅ **Auth failures no longer masquerade as an empty account** — a 401 during notebook
+  listing used to surface as `📚 No OneNote notebooks found.`, which points at the
+  wrong problem entirely. The error now names the cause and the command to fix it.
+- ✅ **`ONENOTE_EXTRA_SITES`** — point the server at SharePoint sites you can read but are
+  not a member of. Their notebooks are returned by neither `/me/onenote/notebooks` nor
+  `/me/joinedTeams`, so there was previously no way to reach them.
+- ✅ **Extra-site notebooks are in scope by default** — no `includeTeamNotebooks: true`
+  required. You named the site explicitly; that is the opt-in.
+
+## 📦 Earlier Updates (February 2026)
 
 **Query Optimization with $orderby and $top - 10-30x Performance Boost!**
 
@@ -130,7 +146,39 @@ page manipulation.
    - **For Quick Testing:** If the `AZURE_CLIENT_ID` environment variable is not set, the server will default to using the Microsoft Graph Explorer's public Client ID. This is suitable for initial testing but not recommended for prolonged or shared use.
    - Alternatively, you can modify the `clientId` variable directly in `onenote-mcp.mjs`, but using an environment variable is preferred.
 
-2. **`.gitignore`:**
+2. **Extra SharePoint sites (optional):**
+
+   By default the server discovers notebooks in your personal OneDrive and in
+   the Microsoft 365 groups/teams you are a **member** of. A notebook that
+   lives on a SharePoint site you can *read* but have not joined is not
+   returned by either of those Graph endpoints, so it is invisible to the
+   server.
+
+   Set `ONENOTE_EXTRA_SITES` to a comma-separated list of SharePoint site URLs
+   to have those sites queried for notebooks as well:
+
+   ```bash
+   export ONENOTE_EXTRA_SITES="https://contoso.sharepoint.com/sites/TeamA,https://contoso.sharepoint.com/sites/TeamB"
+   ```
+
+   Or in your MCP client config:
+
+   ```json
+   "env": {
+     "AZURE_CLIENT_ID": "YOUR_AZURE_APP_CLIENT_ID_HERE",
+     "ONENOTE_EXTRA_SITES": "https://contoso.sharepoint.com/sites/TeamA"
+   }
+   ```
+
+   You still need read access to the site; this only tells the server where to
+   look. Sites that cannot be resolved are skipped without failing the rest of
+   the notebook listing.
+
+   Notebooks from these sites are returned by `listNotebooks` and the search
+   tools **without** needing `includeTeamNotebooks: true` — you configured them
+   explicitly, so they are treated as in scope by default.
+
+3. **`.gitignore`:**
 
    The project includes a `.gitignore` file. Ensure it contains at least the following to prevent committing sensitive files:
 
@@ -200,7 +248,13 @@ The first time you try to use a OneNote tool through your AI assistant, or by ex
 5. **Token Saved:** Upon successful browser authentication, the server will automatically receive and save the access token to an `.access-token.txt` file in its directory.
 6. **Verify (Optional but Recommended):** Invoke the `saveAccessToken` tool through your AI assistant. This tool doesn't actually save (as it's already saved by the background process) but rather loads and verifies the token, confirming successful authentication and displaying your account info.
 
-The saved token will be used for subsequent sessions until it expires, at which point you may need to re-authenticate.
+The saved token is reused across sessions. Access tokens themselves are short-lived
+(~60-90 minutes), but the server checks the expiry before each use and renews silently
+from the cached refresh token, so this is invisible in normal use. You only need to
+authenticate again if silent renewal fails — typically after a long idle period, a
+password change, an MFA reset, or a Conditional Access policy demanding fresh sign-in.
+When that happens the server says so explicitly rather than returning an empty notebook
+list.
 
 ## Available MCP Tools
 
@@ -218,6 +272,8 @@ This server exposes the following tools to your AI assistant:
   - Note: Does not include personally shared notebooks from OneDrive due to Microsoft API limitations.
   - **NEW:** Results are cached for 5 minutes for better performance
   - **NEW:** Team notebooks show which team they belong to
+  - Notebooks from sites listed in `ONENOTE_EXTRA_SITES` are always included, whether or
+    not `includeTeamNotebooks` is set.
 - `listSections`: Lists all sections in a specific notebook. (Args: `notebookId` (string))
   - **FIXED:** Now works with team notebook IDs!
 - `listPagesInSection`: Lists pages in a specific section with pagination support. (Args: `sectionId` (string), `top` (number, optional, max 100), `orderBy` (enum: "created", "modified", optional))
