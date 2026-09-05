@@ -12,7 +12,18 @@ This server provides a rich set of tools for advanced OneNote management,
 including robust text extraction, HTML content processing, and fine-grained
 page manipulation.
 
-## 🆕 Latest Updates (February 2026)
+## 🆕 Latest Updates (September 2026)
+
+**Access-token expiry is now handled.**
+
+- ✅ **Access tokens are checked for expiry before use** — previously a loaded token was
+  reused forever, so after its ~60-90 minute lifetime every Graph call returned 401.
+  Silent renewal was available but never attempted.
+- ✅ **Auth failures no longer masquerade as an empty account** — a 401 during notebook
+  listing used to surface as `📚 No OneNote notebooks found.`, which points at the
+  wrong problem entirely. The error now names the cause and the command to fix it.
+
+## 📦 Earlier Updates (February 2026)
 
 **Query Optimization with $orderby and $top - 10-30x Performance Boost!**
 
@@ -200,7 +211,13 @@ The first time you try to use a OneNote tool through your AI assistant, or by ex
 5. **Token Saved:** Upon successful browser authentication, the server will automatically receive and save the access token to an `.access-token.txt` file in its directory.
 6. **Verify (Optional but Recommended):** Invoke the `saveAccessToken` tool through your AI assistant. This tool doesn't actually save (as it's already saved by the background process) but rather loads and verifies the token, confirming successful authentication and displaying your account info.
 
-The saved token will be used for subsequent sessions until it expires, at which point you may need to re-authenticate.
+The saved token is reused across sessions. Access tokens themselves are short-lived
+(~60-90 minutes), but the server checks the expiry before each use and renews silently
+from the cached refresh token, so this is invisible in normal use. You only need to
+authenticate again if silent renewal fails — typically after a long idle period, a
+password change, an MFA reset, or a Conditional Access policy demanding fresh sign-in.
+When that happens the server says so explicitly rather than returning an empty notebook
+list.
 
 ## Available MCP Tools
 

@@ -33,6 +33,7 @@ useIdentityPlugin(cachePersistencePlugin);
 
 // --- Global State ---
 let accessToken = null;
+let accessTokenExpiresOn = null; // epoch ms for the current accessToken; null = unknown
 let graphClient = null;
 let notebookCache = null; // Cache of notebooks with group info
 let cacheTimestamp = null; // When cache was last updated
@@ -40,6 +41,7 @@ let teamNotebooksLoading = false; // Flag to prevent duplicate team loads
 let sectionToNotebookMap = {}; // Maps sectionId → notebookId for page→endpoint resolution
 let resolvedSiteIds = {}; // Cache of siteUrl → siteId to avoid re-resolving
 let sharedCredential = null; // Single DeviceCodeCredential instance, reused across calls
+let sharedCredentialHasRecord = false; // Whether sharedCredential was built with a persisted auth record
 let latestDeviceCodeInfo = null; // Set by userPromptCallback when interactive auth is needed
 
 // --- MCP Server Initialization ---
@@ -52,6 +54,38 @@ const server = new McpServer({
 // ============================================================================
 // AUTHENTICATION & MICROSOFT GRAPH CLIENT MANAGEMENT
 // ============================================================================
+
+/**
+ * Reads the `exp` claim straight out of a JWT access token.
+ * Trusting the token itself is more reliable than the sidecar file, which can
+ * be stale or in the old plain-text format.
+ * @param {string} tok
+ * @returns {number|null} Expiry in epoch ms, or null if undeterminable.
+ */
+function tokenExpiryFromJwt(tok) {
+  try {
+    const payload = JSON.parse(Buffer.from(tok.split('.')[1], 'base64url').toString());
+    return payload.exp ? payload.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Refresh this far ahead of the real expiry so in-flight calls do not race it. */
+const TOKEN_EXPIRY_SKEW_MS = 5 * 60 * 1000;
+
+/**
+ * True only if we hold a token that is present AND not about to expire.
+ * Entra access tokens live ~60-90 minutes, so presence alone is not enough:
+ * checking only `!accessToken` leaves a dead token in memory forever and every
+ * Graph call then 401s (which listNotebooks reports as "no notebooks found").
+ * @returns {boolean}
+ */
+function haveFreshToken() {
+  if (!accessToken) return false;
+  if (!accessTokenExpiresOn) return true; // unknown expiry: use it, a 401 will still surface
+  return Date.now() < accessTokenExpiresOn - TOKEN_EXPIRY_SKEW_MS;
+}
 
 /**
  * Loads an existing access token from the local file system.
@@ -67,6 +101,14 @@ function loadExistingToken() {
       } catch (parseError) {
         accessToken = tokenData; // Old format: plain token string
         console.error('Loaded existing token from file (plain text format).');
+      }
+      accessTokenExpiresOn = accessToken ? tokenExpiryFromJwt(accessToken) : null;
+      if (accessToken && accessTokenExpiresOn && Date.now() >= accessTokenExpiresOn) {
+        // Do not keep a dead token: it would satisfy `accessToken` truthiness
+        // and suppress every future silent-renewal attempt.
+        console.error('Token file holds an expired token; discarding so renewal can run.');
+        accessToken = null;
+        accessTokenExpiresOn = null;
       }
     }
   } catch (error) {
@@ -128,6 +170,8 @@ function saveAuthenticationRecord(record) {
  */
 function persistAccessTokenFile(tokenResponse) {
   try {
+    accessTokenExpiresOn = tokenResponse?.expiresOnTimestamp
+      ?? (accessToken ? tokenExpiryFromJwt(accessToken) : null);
     const tokenData = {
       token: accessToken,
       clientId,
@@ -151,13 +195,21 @@ function persistAccessTokenFile(tokenResponse) {
  * @returns {DeviceCodeCredential}
  */
 function getSharedCredential() {
+  // If the credential was built before a login completed (no auth record yet)
+  // but a record now exists on disk, rebuild so silent renewal can find the account.
+  if (sharedCredential && !sharedCredentialHasRecord && fs.existsSync(authRecordFilePath)) {
+    sharedCredential = null;
+  }
   if (!sharedCredential) {
     const existingRecord = loadAuthenticationRecord();
+    sharedCredentialHasRecord = Boolean(existingRecord);
     sharedCredential = new DeviceCodeCredential({
       clientId,
       tokenCachePersistenceOptions: {
         enabled: true,
-        name: 'onenote-mcp-token-cache'
+        name: 'onenote-mcp-token-cache',
+        // WSL/headless Linux has no keyring daemon; fall back to an on-disk cache
+        unsafeAllowUnencryptedStorage: true
       },
       disableAutomaticAuthentication: true,
       authenticationRecord: existingRecord,
@@ -199,14 +251,21 @@ async function trySilentToken() {
  * @returns {Promise<Client>} The initialized and authenticated Graph client.
  */
 async function ensureGraphClient() {
-  if (!accessToken) {
+  if (!haveFreshToken()) {
+    // Drop the stale token first so trySilentToken() is genuinely re-entered
+    // and a failure cannot leave an expired bearer in place.
+    accessToken = null;
+    accessTokenExpiresOn = null;
     const gotSilentToken = await trySilentToken();
     if (!gotSilentToken) {
       loadExistingToken();
     }
   }
-  if (!accessToken) {
-    throw new Error('No access token available. Please authenticate first using the "authenticate" tool.');
+  if (!haveFreshToken()) {
+    throw new Error(
+      'No valid access token available (missing or expired, and silent renewal failed). ' +
+      'Re-authenticate with: node ~/tools/onenote-mcp/auth-cli.mjs'
+    );
   }
   if (!graphClient) {
     initializeGraphClient();
