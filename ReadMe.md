@@ -14,7 +14,7 @@ page manipulation.
 
 ## 🆕 Latest Updates (September 2026)
 
-**Access-token expiry is now handled.**
+**Access-token expiry is now handled, and notebooks on non-member SharePoint sites are reachable.**
 
 - ✅ **Access tokens are checked for expiry before use** — previously a loaded token was
   reused forever, so after its ~60-90 minute lifetime every Graph call returned 401.
@@ -22,6 +22,9 @@ page manipulation.
 - ✅ **Auth failures no longer masquerade as an empty account** — a 401 during notebook
   listing used to surface as `📚 No OneNote notebooks found.`, which points at the
   wrong problem entirely. The error now names the cause and the command to fix it.
+- ✅ **`ONENOTE_EXTRA_SITES`** — point the server at SharePoint sites you can read but are
+  not a member of. Their notebooks are returned by neither `/me/onenote/notebooks` nor
+  `/me/joinedTeams`, so there was previously no way to reach them.
 
 ## 📦 Earlier Updates (February 2026)
 
@@ -141,7 +144,35 @@ page manipulation.
    - **For Quick Testing:** If the `AZURE_CLIENT_ID` environment variable is not set, the server will default to using the Microsoft Graph Explorer's public Client ID. This is suitable for initial testing but not recommended for prolonged or shared use.
    - Alternatively, you can modify the `clientId` variable directly in `onenote-mcp.mjs`, but using an environment variable is preferred.
 
-2. **`.gitignore`:**
+2. **Extra SharePoint sites (optional):**
+
+   By default the server discovers notebooks in your personal OneDrive and in
+   the Microsoft 365 groups/teams you are a **member** of. A notebook that
+   lives on a SharePoint site you can *read* but have not joined is not
+   returned by either of those Graph endpoints, so it is invisible to the
+   server.
+
+   Set `ONENOTE_EXTRA_SITES` to a comma-separated list of SharePoint site URLs
+   to have those sites queried for notebooks as well:
+
+   ```bash
+   export ONENOTE_EXTRA_SITES="https://contoso.sharepoint.com/sites/TeamA,https://contoso.sharepoint.com/sites/TeamB"
+   ```
+
+   Or in your MCP client config:
+
+   ```json
+   "env": {
+     "AZURE_CLIENT_ID": "YOUR_AZURE_APP_CLIENT_ID_HERE",
+     "ONENOTE_EXTRA_SITES": "https://contoso.sharepoint.com/sites/TeamA"
+   }
+   ```
+
+   You still need read access to the site; this only tells the server where to
+   look. Sites that cannot be resolved are skipped without failing the rest of
+   the notebook listing.
+
+3. **`.gitignore`:**
 
    The project includes a `.gitignore` file. Ensure it contains at least the following to prevent committing sensitive files:
 

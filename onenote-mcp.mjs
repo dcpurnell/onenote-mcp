@@ -26,6 +26,13 @@ const clientId = process.env.AZURE_CLIENT_ID || '14d82eec-204b-4c2f-b7e8-296a70d
 // Updated scopes to include .All permissions for accessing shared/team notebooks
 const scopes = ['Notes.Read', 'Notes.ReadWrite', 'Notes.Read.All', 'Notes.ReadWrite.All', 'Notes.Create', 'User.Read'];
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+// Extra SharePoint sites to pull notebooks from, comma-separated site URLs.
+// Needed for notebooks on a site the user can READ but is not a MEMBER of:
+// /me/onenote/notebooks and /me/joinedTeams both omit those, so they are
+// undiscoverable and must be named explicitly.
+// e.g. ONENOTE_EXTRA_SITES="https://contoso.sharepoint.com/sites/TechnicalLeadership"
+const extraSiteUrls = (process.env.ONENOTE_EXTRA_SITES || '')
+  .split(',').map(u => u.trim()).filter(Boolean);
 
 // Register the persistent token cache plugin (backed by macOS Keychain) once,
 // before any credential is constructed, so refresh tokens survive process restarts.
@@ -814,6 +821,40 @@ function saveNotebookCacheToDisk() {
 }
 
 /**
+ * Fetches notebooks from explicitly-configured SharePoint sites (ONENOTE_EXTRA_SITES).
+ * Each is tagged with _siteId so getNotebookBasePath routes it via /sites/{id}/onenote.
+ * Failures are logged per-site and never abort the wider cache refresh.
+ * @returns {Promise<Array>} Notebook cache entries, possibly empty.
+ */
+async function fetchExtraSiteNotebooks() {
+  if (extraSiteUrls.length === 0) return [];
+  const results = await Promise.allSettled(extraSiteUrls.map(async (siteUrl) => {
+    const siteId = await resolveSiteId(siteUrl);
+    const response = await graphClient.api(`/sites/${siteId}/onenote/notebooks`).get();
+    const siteLabel = (parseSharePointUrl(siteUrl)?.sitePath || siteUrl).split('/').pop();
+    return (response.value || []).map(nb => ({
+      ...nb,
+      displayName: nb.displayName || nb.name || `${siteLabel} Notebook`,
+      _isPersonal: false,
+      _groupId: null,
+      _siteId: siteId,
+      _teamName: siteLabel,
+      _isFromExtraSite: true
+    }));
+  }));
+  results.forEach((r, i) => {
+    if (r.status === 'rejected') {
+      console.error(`Error fetching notebooks for extra site ${extraSiteUrls[i]}: ${r.reason?.message || r.reason}`);
+    }
+  });
+  const notebooks = results.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
+  if (notebooks.length > 0) {
+    console.error(`Loaded ${notebooks.length} notebook(s) from ${extraSiteUrls.length} configured extra site(s).`);
+  }
+  return notebooks;
+}
+
+/**
  * Refreshes the notebook cache with both personal and team notebooks.
  * Uses aggressive parallelization and progressive loading.
  * @param {boolean} includeTeams - Whether to include team notebooks.
@@ -835,6 +876,14 @@ async function refreshNotebookCache(includeTeams = true, personalOnly = false) {
       _teamName: null
     }));
     
+    // Explicitly-configured sites the user can read but is not a member of.
+    // Cheap (usually one site) and merged before the personalOnly early return
+    // so these notebooks are never missing from a fast path.
+    const extraSiteNotebooks = await fetchExtraSiteNotebooks();
+    if (extraSiteNotebooks.length > 0) {
+      allNotebooks = [...allNotebooks, ...extraSiteNotebooks];
+    }
+
     // Update cache with personal notebooks immediately
     notebookCache = allNotebooks;
     cacheTimestamp = Date.now();
@@ -966,9 +1015,11 @@ async function refreshTeamNotebooksBackground() {
       .filter(r => r.status === 'fulfilled')
       .flatMap(r => r.value);
     
-    // Merge with existing cache (keep personal notebooks)
+    // Merge with existing cache (keep personal AND configured extra-site notebooks —
+    // extra-site entries are not re-fetched here, so filtering them out would drop them)
     const personalNotebooks = notebookCache?.filter(nb => nb._isPersonal) || [];
-    notebookCache = [...personalNotebooks, ...teamNotebooks];
+    const extraSiteNotebooks = notebookCache?.filter(nb => nb._isFromExtraSite) || [];
+    notebookCache = [...personalNotebooks, ...extraSiteNotebooks, ...teamNotebooks];
     cacheTimestamp = Date.now();
     saveNotebookCacheToDisk();
     

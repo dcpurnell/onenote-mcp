@@ -222,6 +222,8 @@ it.
 2. 🔄 Token cached - try deleting `.access-token.txt` and re-authenticate
 3. 📋 Actually no notebooks - verify in OneNote web/app that you have notebooks
 4. 🏢 Organizational policy - some enterprises restrict `.All` permissions
+5. 🔍 The notebook exists but is **undiscoverable** rather than inaccessible - see the next
+   issue
 
 ### Issue: "Admin consent required"
 
@@ -237,6 +239,14 @@ it.
 - Complete within 15 minutes
 - Check firewall/proxy isn't blocking Microsoft login
 - Try different browser or incognito mode
+
+### Issue: A notebook you can open in the browser never appears
+
+`/me/onenote/notebooks` returns your personal notebooks and `/me/joinedTeams` the groups
+you are a **member** of. A notebook on a SharePoint site you have read access to but have
+not joined is in neither, so the server cannot find it however many times you re-auth.
+
+Set `ONENOTE_EXTRA_SITES` to that site's URL (see the ReadMe's Configuration section).
 
 ### Issue: Graph API returns 403 Forbidden
 
