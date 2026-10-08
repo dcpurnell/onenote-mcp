@@ -739,21 +739,32 @@ function formatPageInfo(page, index = null, includeCreator = false) {
  * @param {string} resourcePath - The resource path (e.g., 'sections', 'pages').
  * @returns {Promise<string>} The correct API path.
  */
+/**
+ * Sections of a notebook INCLUDING those inside section groups.
+ * /notebooks/{id}/sections returns only top-level sections; $expand on this query 500s on personal accounts.
+ */
+function notebookSectionsPath(basePath, notebookId) {
+  return `${basePath}/sections?$filter=parentNotebook/id eq '${notebookId}'`;
+}
+
 async function getNotebookApiPath(notebookId, resourcePath) {
+  const build = (basePath) => resourcePath === 'sections'
+    ? notebookSectionsPath(basePath, notebookId)
+    : `${basePath}/notebooks/${notebookId}/${resourcePath}`;
+
   // Check cache first
   if (notebookCache) {
     const notebook = notebookCache.find(nb => nb.id === notebookId);
     if (notebook) {
-      const basePath = await getOnenoteBasePath(notebook);
-      return `${basePath}/notebooks/${notebookId}/${resourcePath}`;
+      return build(await getOnenoteBasePath(notebook));
     }
   }
-  
+
   // Try personal notebook path first
   try {
     await ensureGraphClient();
     await graphClient.api(`/me/onenote/notebooks/${notebookId}`).get();
-    return `/me/onenote/notebooks/${notebookId}/${resourcePath}`;
+    return build('/me/onenote');
   } catch (error) {
     // If that fails, search in team notebooks
     if (!notebookCache) {
@@ -761,8 +772,7 @@ async function getNotebookApiPath(notebookId, resourcePath) {
     }
     const notebook = notebookCache?.find(nb => nb.id === notebookId);
     if (notebook) {
-      const basePath = await getOnenoteBasePath(notebook);
-      return `${basePath}/notebooks/${notebookId}/${resourcePath}`;
+      return build(await getOnenoteBasePath(notebook));
     }
     throw new Error(`Notebook ${notebookId} not found in personal or team notebooks. Error: ${error.message}`);
   }
@@ -1214,7 +1224,7 @@ server.tool(
       sections.forEach(s => registerSectionMapping(s.id, notebookId));
       
       if (sections.length > 0) {
-        const sectionList = sections.map((section, i) => `${i + 1}. **${section.displayName}**\n   ID: ${section.id}\n   Created: ${new Date(section.createdDateTime).toLocaleDateString()}`).join('\n\n');
+        const sectionList = sections.map((section, i) => `${i + 1}. **${section.parentSectionGroup ? `${section.parentSectionGroup.displayName} / ` : ''}${section.displayName}**\n   ID: ${section.id}\n   Created: ${new Date(section.createdDateTime).toLocaleDateString()}`).join('\n\n');
         return { content: [{ type: 'text', text: `📂 **Sections in Notebook** (${sections.length} found):\n\n${sectionList}` }] };
       } else {
         return { content: [{ type: 'text', text: '📂 No sections found in this notebook.' }] };
@@ -1333,7 +1343,7 @@ server.tool(
       // Iterate through notebooks and query sections with correct endpoint routing
       for (const notebook of notebooks) {
         const basePath = await getOnenoteBasePath(notebook);
-        const sections = await paginateGraphRequest(`${basePath}/notebooks/${notebook.id}/sections`);
+        const sections = await paginateGraphRequest(notebookSectionsPath(basePath, notebook.id));
         sectionsSearched += sections.length;
         
         // Register section mappings for later page routing
@@ -1463,7 +1473,7 @@ server.tool(
       for (const notebook of notebooks) {
         // Get correct API base path for this notebook (personal, site, or group)
         const basePath = await getOnenoteBasePath(notebook);
-        const sectionsPath = `${basePath}/notebooks/${notebook.id}/sections`;
+        const sectionsPath = notebookSectionsPath(basePath, notebook.id);
         
         let sections = [];
         try {
@@ -1627,7 +1637,7 @@ server.tool(
       
       for (const notebook of notebooks) {
         const basePath = await getOnenoteBasePath(notebook);
-        const sections = await paginateGraphRequest(`${basePath}/notebooks/${notebook.id}/sections`);
+        const sections = await paginateGraphRequest(notebookSectionsPath(basePath, notebook.id));
         
         // Register section mappings
         sections.forEach(s => registerSectionMapping(s.id, notebook.id));
@@ -1798,7 +1808,7 @@ server.tool(
       for (const notebook of notebooks) {
         // Get correct API base path for this notebook (personal, site, or group)
         const basePath = await getOnenoteBasePath(notebook);
-        const apiPath = `${basePath}/notebooks/${notebook.id}/sections`;
+        const apiPath = notebookSectionsPath(basePath, notebook.id);
         
         let sections = [];
         try {
@@ -1936,7 +1946,7 @@ server.tool(
       
       // Find the section using correct endpoint
       const basePath = await getOnenoteBasePath(notebook);
-      const sections = await paginateGraphRequest(`${basePath}/notebooks/${notebook.id}/sections`);
+      const sections = await paginateGraphRequest(notebookSectionsPath(basePath, notebook.id));
       
       // Register section mappings
       sections.forEach(s => registerSectionMapping(s.id, notebook.id));
@@ -2212,7 +2222,7 @@ server.tool(
           try {
             const basePath = await getOnenoteBasePath(notebook);
             if (basePath === '/me/onenote') continue; // already searched
-            const sections = await paginateGraphRequest(`${basePath}/notebooks/${notebook.id}/sections`);
+            const sections = await paginateGraphRequest(notebookSectionsPath(basePath, notebook.id));
             sections.forEach(s => registerSectionMapping(s.id, notebook.id));
             for (const section of sections) {
               if (matchingPage) break;
