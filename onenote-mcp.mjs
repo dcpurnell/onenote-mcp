@@ -8,12 +8,14 @@ import {
   serializeAuthenticationRecord,
   deserializeAuthenticationRecord
 } from '@azure/identity';
-import { cachePersistencePlugin } from '@azure/identity-cache-persistence';
+import { FilePersistence, PersistenceCachePlugin } from '@azure/msal-node-extensions';
+import { LogLevel } from '@azure/msal-common/node';
 import { JSDOM } from 'jsdom';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fetch from 'node-fetch';
+import { spawn } from 'node:child_process';
 import { z } from "zod";
 import { getTokenExpiry, isTokenStale, TOKEN_REFRESH_BUFFER_MS } from './lib/tokenExpiry.mjs';
 
@@ -28,13 +30,90 @@ const clientId = process.env.AZURE_CLIENT_ID || '14d82eec-204b-4c2f-b7e8-296a70d
 const scopes = ['Notes.Read', 'Notes.ReadWrite', 'Notes.Read.All', 'Notes.ReadWrite.All', 'Notes.Create', 'User.Read'];
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-// Register the persistent token cache plugin (backed by macOS Keychain) once,
-// before any credential is constructed, so refresh tokens survive process restarts.
-useIdentityPlugin(cachePersistencePlugin);
+// --- File-backed MSAL token cache persistence ------------------------------
+// The keyring-based plugin (@azure/identity-cache-persistence) needs a DBus/
+// libsecret session on Linux (or macOS Keychain), which the headless gateway
+// lacks; a failed keyring init crashed this server ~2s after the first tool
+// call. Instead we register a persistence factory that writes the full MSAL
+// cache — including refresh tokens — to a JSON file next to this script. That
+// lets trySilentToken() renew access tokens across process/gateway restarts
+// without any keyring. FilePersistence chmods the cache file to 0600.
+// --- Hardened MSAL cache persistence (2026-08-19) --------------------------
+// FilePersistence.save() in @azure/msal-node-extensions uses a plain
+// promises.writeFile() — a torn write (process kill, disk hiccup, or a second
+// process hitting the same file) leaves a corrupted cache (observed twice on
+// 2026-08-19: a ~1500-char binary blob where the JWT should be) that bricks
+// silent renewal until a device-code re-auth. So we:
+//   1. write the cache atomically (tmp + rename) so a crash can't tear it;
+//   2. keep a validated last-good snapshot (<cacheFile>.lastgood);
+//   3. auto-restore from that snapshot when the cache fails validation
+//      (process startup + before the first silent renewal), so a corrupt
+//      file self-heals instead of forcing a re-auth.
+function msalValidateCacheFile(file) {
+  try {
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return data !== null && typeof data === 'object';
+  } catch {
+    return false;
+  }
+}
+async function msalAtomicWrite(file, contents) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  await fs.promises.writeFile(tmp, contents, { encoding: 'utf-8', mode: 0o600 });
+  await fs.promises.rename(tmp, file);
+}
+function msalEnsureCacheHealthy(cacheFile) {
+  if (msalValidateCacheFile(cacheFile)) return;
+  const lastGood = `${cacheFile}.lastgood`;
+  if (!fs.existsSync(lastGood) || !msalValidateCacheFile(lastGood)) {
+    console.error(`MSAL cache ${cacheFile} is corrupt and no valid .lastgood snapshot exists — device-code re-auth required.`);
+    return;
+  }
+  fs.copyFileSync(lastGood, cacheFile);
+  fs.chmodSync(cacheFile, 0o600);
+  console.error(`MSAL cache ${cacheFile} was corrupt — restored validated snapshot from ${lastGood}.`);
+}
+const msalCacheFilePlugin = (context) => {
+  context.cachePluginControl.setPersistence(async (options) => {
+    const name = options?.name || 'onenote-mcp-token-cache';
+    const cacheFile = path.join(__dirname, `.msal-cache-${name}.json`);
+    const lastGood = `${cacheFile}.lastgood`;
+    const persistence = await FilePersistence.create(cacheFile, {
+      loggerCallback: () => {},
+      logLevel: LogLevel.Error
+    });
+    // Hardened save: atomic write + validated last-good snapshot.
+    persistence.save = async (contents) => {
+      await msalAtomicWrite(cacheFile, contents);
+      await fs.promises.chmod(cacheFile, 0o600);
+      try {
+        if (msalValidateCacheFile(cacheFile)) {
+          await msalAtomicWrite(lastGood, fs.readFileSync(cacheFile, 'utf8'));
+          await fs.promises.chmod(lastGood, 0o600);
+        }
+      } catch (err) {
+        console.error(`MSAL cache last-good snapshot failed: ${err.message}`);
+      }
+    };
+    msalEnsureCacheHealthy(cacheFile);
+    return new PersistenceCachePlugin(persistence, { retryNumber: 100, retryDelay: 50 });
+  });
+};
+// Register once, before any credential is constructed, so refresh tokens
+// survive process restarts.
+useIdentityPlugin(msalCacheFilePlugin);
+// Startup health check: self-heal a corrupt cache now (before the first
+// silent renewal in this process), not only lazily on credential creation.
+try {
+  msalEnsureCacheHealthy(path.join(__dirname, '.msal-cache-onenote-mcp-token-cache.json'));
+} catch (e) {
+  console.error(`MSAL cache startup health check failed: ${e.message}`);
+}
 
 // --- Global State ---
 let accessToken = null;
 let accessTokenExpiresAt = null; // Epoch ms for the current accessToken, or null if unknown
+
 let graphClient = null;
 let notebookCache = null; // Cache of notebooks with group info
 let cacheTimestamp = null; // When cache was last updated
@@ -60,6 +139,7 @@ const server = new McpServer({
  * buffer of expiring. A token whose expiry cannot be determined is treated as
  * usable, so opaque (non-JWT) tokens keep working.
  * @returns {boolean}
+
  */
 function hasUsableAccessToken() {
   if (!accessToken) return false;
@@ -93,6 +173,7 @@ function loadExistingToken({ allowExpired = false } = {}) {
     } catch (parseError) {
       token = tokenData.trim(); // Old format: plain token string
       format = 'plain text';
+
     }
 
     if (!token) {
@@ -124,6 +205,7 @@ function loadExistingToken({ allowExpired = false } = {}) {
     console.error(`Error loading token: ${error.message}`);
     return false;
   }
+  return false;
 }
 
 /**
@@ -196,7 +278,8 @@ function persistAccessTokenFile(tokenResponse) {
 /**
  * Gets (or lazily creates) the single shared DeviceCodeCredential instance.
  * Cache persistence is enabled so refresh tokens survive process restarts
- * (stored in the macOS Keychain). disableAutomaticAuthentication is set so
+ * (stored in a file via the file-backed cache plugin registered above).
+ * disableAutomaticAuthentication is set so
  * that silent getToken() calls fail fast instead of unexpectedly prompting
  * mid-tool-call — interactive prompting only happens via the explicit
  * 'authenticate' tool, which calls credential.authenticate() directly.
@@ -208,6 +291,10 @@ function getSharedCredential() {
     sharedCredential = new DeviceCodeCredential({
       clientId,
       tokenCachePersistenceOptions: {
+        // Enabled with the file-backed cache plugin (registered above): the
+        // MSAL cache — including refresh tokens — is persisted to
+        // .msal-cache-*.json next to this script, so silent renewal survives
+        // process/gateway restarts on the headless gateway (no keyring).
         enabled: true,
         name: 'onenote-mcp-token-cache'
       },
@@ -234,6 +321,7 @@ async function trySilentToken() {
     if (tokenResponse?.token) {
       accessToken = tokenResponse.token;
       accessTokenExpiresAt = tokenResponse.expiresOnTimestamp ?? getTokenExpiry(tokenResponse.token);
+
       persistAccessTokenFile(tokenResponse);
       console.error('Renewed access token silently from persisted cache.');
       return true;
@@ -253,6 +341,7 @@ async function trySilentToken() {
  */
 async function ensureGraphClient() {
   if (!hasUsableAccessToken()) {
+
     const gotSilentToken = await trySilentToken();
     // Only fall back to the flat token file when we have nothing at all; a
     // token already in memory is at least as fresh as whatever is on disk.
@@ -260,7 +349,7 @@ async function ensureGraphClient() {
       loadExistingToken();
     }
   }
-  if (!accessToken) {
+  if (!hasUsableAccessToken()) {
     throw new Error('No access token available. Please authenticate first using the "authenticate" tool.');
   }
   if (!graphClient) {
@@ -344,6 +433,138 @@ function extractTextSummary(html, maxLength = 300) {
     console.error(`Error extracting text summary: ${error.message}`);
     return 'Could not extract text summary.';
   }
+}
+
+// ============================================================================
+// LLM SUMMARIZATION — local "llama" inference path
+// ============================================================================
+// summarizeContent() produces the pageSummary values stored in index.json /
+// INDEX.md. It calls a local OpenAI-compatible llama server (the same
+// `lillama` endpoint the index-refresh cron runs on) and falls back to
+// deterministic text extraction when the model is unreachable, so an index
+// run never fails because of a down model. Override via env:
+//   LLAMA_API_URL (default http://192.168.0.1:8888/v1/chat/completions)
+//   LLAMA_MODEL   (default "lillama")
+//   LLAMA_API_KEY (optional bearer token)
+//   LLAMA_TIMEOUT_MS (default 45000)
+
+const LLM_API_URL = process.env.LLAMA_API_URL || 'http://192.168.0.1:8888/v1/chat/completions';
+const LLM_MODEL = process.env.LLAMA_MODEL || 'lillama';
+const LLM_API_KEY = process.env.LLAMA_API_KEY || '';
+const LLM_TIMEOUT_MS = Number(process.env.LLAMA_TIMEOUT_MS || 45000);
+const LLM_MAX_INPUT_CHARS = 12000;   // keep prompts small for batch index runs
+const LLM_MAX_SUMMARY_CHARS = 200;   // one or two tight sentences
+const llmSummaryCache = new Map();   // cacheKey -> { summary, source }
+let llmConsecutiveFailures = 0;      // circuit breaker: stop calling a dead model
+
+function isProbablyHtml(s) {
+  return typeof s === 'string' && /<\s*(html|!doctype|body|meta|div|p|h[1-6]|ul|ol|table)/i.test(s);
+}
+
+/**
+ * Deterministic (non-LLM) summary: first chunk of plain text. Used when the
+ * local llama server is unavailable so the index still gets *something*.
+ */
+function deterministicTextSummary(text, maxLength = LLM_MAX_SUMMARY_CHARS) {
+  const flat = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!flat) return 'No extractable text content.';
+  return flat.length <= maxLength ? flat : `${flat.slice(0, maxLength).trimEnd()}...`;
+}
+
+/**
+ * Calls the local llama-compatible /chat/completions endpoint and returns a
+ * single-sentence summary of the page content.
+ * The default endpoint serves a Qwen reasoning model, so the first attempt
+ * suppresses the thinking pass via chat_template_kwargs (fast, clean output);
+ * if the server rejects that shape (older llama.cpp) or returns an empty
+ * content field, it retries with a plain request whose token budget covers
+ * reasoning tokens.
+ * @throws on network/HTTP/parse failures (caller falls back to extraction).
+ */
+async function callLlamaSummarizer(plainText, title, maxLength) {
+  const prompt = `Page title: ${title || '(untitled)'}\n\nPage content:\n${plainText.slice(0, LLM_MAX_INPUT_CHARS)}`;
+  const baseBody = {
+    model: LLM_MODEL,
+    stream: false,
+    temperature: 0.2,
+    messages: [
+      { role: 'system', content: 'You index OneNote pages. Summarize the given page in ONE factual sentence (max ~35 words) capturing what the page is about. No preamble, no quotes, no markdown.' },
+      { role: 'user', content: prompt }
+    ]
+  };
+  const attempts = [
+    { ...baseBody, max_tokens: 256, chat_template_kwargs: { enable_thinking: false } },
+    { ...baseBody, max_tokens: 512 }
+  ];
+  const headers = { 'Content-Type': 'application/json' };
+  if (LLM_API_KEY) headers['Authorization'] = `Bearer ${LLM_API_KEY}`;
+  let lastError = null;
+  for (const body of attempts) {
+    try {
+      const response = await fetch(LLM_API_URL, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(LLM_TIMEOUT_MS)
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
+      const data = await response.json();
+      const raw = data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? '';
+      const cleaned = String(raw).replace(/\s+/g, ' ').trim().replace(/^["'`]+|["'`]+$/g, '');
+      if (!cleaned) throw new Error('Empty LLM response');
+      return cleaned.length <= maxLength ? cleaned : `${cleaned.slice(0, maxLength).trimEnd()}...`;
+    } catch (error) {
+      lastError = error;
+      const msg = String(error?.message || '');
+      // Retry the plain variant when the server rejected the request shape
+      // (4xx, e.g. unsupported chat_template_kwargs) or the response came
+      // back empty (e.g. reasoning exhausted the token budget). Network
+      // errors, 5xx, and timeouts break out straight to the caller's
+      // deterministic fallback instead of burning a second round-trip.
+      if (msg.startsWith('HTTP 4') || msg === 'Empty LLM response') continue;
+      break;
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Summarizes OneNote page content for the local index (pageSummary).
+ * Inference path: local llama server (llama/lillama); fallback: extraction.
+ * @param {string} content - Raw page content (HTML or plain text).
+ * @param {object} [options]
+ * @param {string} [options.title] - Page title, used as LLM context.
+ * @param {string} [options.cacheKey] - e.g. `${pageId}:${lastModifiedDateTime}`; memoizes per process.
+ * @param {number} [options.maxLength] - Max summary length (default LLM_MAX_SUMMARY_CHARS).
+ * @returns {Promise<{ summary: string, source: 'llm' | 'fallback' | 'cache' }>}
+ */
+async function summarizeContent(content, { title = '', cacheKey = null, maxLength = LLM_MAX_SUMMARY_CHARS } = {}) {
+  const text = isProbablyHtml(content) ? extractReadableText(content) : String(content ?? '');
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (!flat) return { summary: 'No extractable text content.', source: 'fallback' };
+
+  if (cacheKey && llmSummaryCache.has(cacheKey)) {
+    return { summary: llmSummaryCache.get(cacheKey).summary, source: 'cache' };
+  }
+
+  let summary = null;
+  let source = 'fallback';
+  if (llmConsecutiveFailures < 3) {
+    try {
+      summary = await callLlamaSummarizer(flat, title, maxLength);
+      source = 'llm';
+      llmConsecutiveFailures = 0;
+    } catch (error) {
+      llmConsecutiveFailures += 1;
+      console.error(`LLM summarization failed (${llmConsecutiveFailures} consecutive): ${error.message}`);
+    }
+  }
+  if (!summary) {
+    summary = deterministicTextSummary(flat, maxLength);
+  }
+
+  if (cacheKey) llmSummaryCache.set(cacheKey, { summary, source });
+  return { summary, source };
 }
 
 /**
@@ -993,25 +1214,50 @@ server.tool(
       latestDeviceCodeInfo = null;
       const credential = getSharedCredential();
 
-      // credential.authenticate() forces the interactive device-code flow
-      // (bypassing disableAutomaticAuthentication) and, on success, returns
-      // an AuthenticationRecord we persist so future processes can renew
-      // silently from the Keychain-backed cache without prompting again.
+      // authenticate() can either resolve immediately from the persisted cache
+      // or remain pending while userPromptCallback supplies a device code.
+      // Race those outcomes so cached success is not misreported as a missing
+      // device code.
       const authPromise = credential.authenticate(scopes)
         .then(async (authRecord) => {
           saveAuthenticationRecord(authRecord);
           const tokenResponse = await credential.getToken(scopes);
           accessToken = tokenResponse.token;
           accessTokenExpiresAt = tokenResponse.expiresOnTimestamp ?? getTokenExpiry(tokenResponse.token);
+
           persistAccessTokenFile(tokenResponse);
           console.error('Token acquired and cached — future sessions should renew automatically.');
           initializeGraphClient();
+          return { ok: true, expiresOnTimestamp: tokenResponse.expiresOnTimestamp ?? null };
         })
         .catch(error => {
           console.error(`Background authentication failed: ${error.message}`);
+          return { ok: false, error };
         });
 
-      await new Promise(resolve => setTimeout(resolve, 2000)); // Allow time for userPromptCallback
+      const earlyResult = await Promise.race([
+        authPromise,
+        new Promise(resolve => setTimeout(() => resolve(null), 2000))
+      ]);
+
+      if (earlyResult?.ok) {
+        const expiration = earlyResult.expiresOnTimestamp
+          ? new Date(earlyResult.expiresOnTimestamp).toISOString()
+          : 'managed by MSAL';
+        return {
+          content: [{
+            type: 'text',
+            text: `✅ **Authentication Active**\n\nCached credentials were verified and the access token is ready.\n**Access token expires:** ${expiration}\nThe persisted refresh token will renew it automatically.`
+          }]
+        };
+      }
+
+      if (earlyResult && !earlyResult.ok) {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: `Authentication failed: ${earlyResult.error.message}` }]
+        };
+      }
 
       if (latestDeviceCodeInfo) {
         const authMessage = `🔐 **AUTHENTICATION REQUIRED**
@@ -1022,11 +1268,13 @@ Please complete the following steps:
 3. **Sign in with your Microsoft account that has OneNote access.**
 4. **After completing authentication, use the 'saveAccessToken' tool to verify.**
 
-This will be saved to your Mac Keychain — future sessions should renew automatically without repeating this step.`;
+This will be saved to the persistent MSAL cache on MintVM, so future sessions can renew automatically.`;
 
         return { content: [{ type: 'text', text: authMessage }] };
       } else {
-        return { isError: true, content: [{ type: 'text', text: 'Could not retrieve device code information. Please try again or check console logs.' }] };
+        return {
+          content: [{ type: 'text', text: 'Authentication is still starting. Retry saveAccessToken shortly to verify completion.' }]
+        };
       }
     } catch (error) {
       return { isError: true, content: [{ type: 'text', text: `Authentication failed: ${error.message}` }] };
@@ -1045,13 +1293,16 @@ server.tool(
   },
   async () => {
     try {
-      if (!accessToken) {
+      if (!hasUsableAccessToken()) {
+        accessToken = null;
+        accessTokenExpiresAt = null;
+        graphClient = null;
         await trySilentToken();
       }
-      if (!accessToken) {
+      if (!hasUsableAccessToken()) {
         loadExistingToken();
       }
-      if (accessToken) {
+      if (hasUsableAccessToken()) {
         initializeGraphClient();
         const testResponse = await graphClient.api('/me').get();
         return {
@@ -2112,6 +2363,307 @@ server.tool(
   }
 );
 
+// ============================================================================
+// LOCAL INDEX PIPELINE (index.json / INDEX.md)
+// ============================================================================
+// The workspace keeps a local OneNote index (see TOOLS.md "OneNote —
+// Index-First Workflow"):
+//   onenote/index.json       — machine-readable (notebooks → sections → pages)
+//   onenote/INDEX.md         — human digest (page entries show "title — pageSummary (date)")
+//   onenote/index-state.json — rotation state (lastAudited per notebook)
+// merge_notebook.py (in the index dir) OWNS those files: it consumes
+// .pending-notebook.json, merges one notebook into index.json, regenerates
+// INDEX.md, and stamps index-state.json. refreshNotebookIndex (below) is the
+// page processing loop: it audits one notebook, derives each pageSummary
+// from the local llama model via summarizeContent(), writes
+// .pending-notebook.json, and runs the merge script — so LLM-derived
+// summaries are what land in index.json and INDEX.md.
+
+const INDEX_ROOT = process.env.ONENOTE_INDEX_DIR || '/home/mintvm/.hermes/onenote';
+const INDEX_PAGES_PER_SECTION = 25;   // index keeps the most recent 25 pages per section
+const INDEX_LISTING_TOP = 100;        // OneNote page listings are capped at 100 per call
+
+function loadLocalIndexJson(root = INDEX_ROOT) {
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(root, 'index.json'), 'utf8'));
+    if (data && Array.isArray(data.notebooks)) return data;
+  } catch { /* no index yet */ }
+  return { notebooks: [] };
+}
+
+/** Runs merge_notebook.py, which owns index.json / INDEX.md / index-state.json. */
+function runIndexMerge(root) {
+  return new Promise((resolve) => {
+    const script = path.join(root, 'merge_notebook.py');
+    if (!fs.existsSync(script)) {
+      return resolve({ ok: false, error: `merge script not found: ${script}` });
+    }
+    let child;
+    try {
+      child = spawn('python3', [script, '--root', root], { stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (error) {
+      return resolve({ ok: false, error: `spawn failed: ${error.message}` });
+    }
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already dead */ } }, 90000);
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('error', (e) => { clearTimeout(timer); resolve({ ok: false, error: e.message }); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ ok: code === 0, code, out: out.trim(), err: err.trim() });
+    });
+  });
+}
+
+// --- Batch + checkpoint state for the notebook audit loop ---
+// A notebook audit = a frozen, ordered queue of candidate pages. Each
+// refreshNotebookIndex call processes ONE batch (at most INDEX_BATCH_SIZE
+// pages) and atomically persists progress to .refresh-checkpoint.json after
+// every page (tmp+rename, same pattern as the MSAL cache). An interrupted run
+// (agent timeout, gateway restart, mid-batch budget exhaustion) resumes from
+// the exact page it stopped on: no re-listing, no re-summarizing. The
+// checkpoint is single-slot: one notebook audit in flight at a time.
+const INDEX_BATCH_SIZE = 10; // hard cap: pages fetched+summarized per call
+const CHECKPOINT_FILE = path.join(INDEX_ROOT, '.refresh-checkpoint.json');
+const MAX_FETCH_FAILURES = 2; // pages failing fetch this many times keep their existing (stale) note
+
+function loadRefreshCheckpoint() {
+  try {
+    const data = JSON.parse(fs.readFileSync(CHECKPOINT_FILE, 'utf8'));
+    if (data && typeof data === 'object' && Array.isArray(data.candidates) && Array.isArray(data.sections)) return data;
+  } catch { /* no checkpoint yet (or unreadable) — start a fresh audit */ }
+  return null;
+}
+
+function saveRefreshCheckpoint(cp) {
+  cp.updatedAt = new Date().toISOString();
+  return msalAtomicWrite(CHECKPOINT_FILE, JSON.stringify(cp, null, 2));
+}
+
+async function clearRefreshCheckpoint() {
+  try { await fs.promises.unlink(CHECKPOINT_FILE); } catch { /* already gone */ }
+}
+
+/** Builds .pending-notebook.json from a finished audit checkpoint and runs merge_notebook.py. */
+async function handOffToMerge(cp) {
+  const pending = {
+    name: cp.notebookName,
+    id: cp.notebookId,
+    auditedAt: new Date().toISOString(),
+    ...(cp.about ? { about: cp.about } : {}),
+    sections: cp.sections.map(s => ({
+      name: s.name,
+      id: s.id,
+      pageTotal: s.pageTotal,
+      ...(s.capped ? { capped: true } : {}),
+      ...(s.pattern ? { pattern: s.pattern } : {}),
+      notes: cp.baseNotes[s.id] || {},
+      pages: s.pages.map(p => ({ title: p.title, date: p.date, id: p.id }))
+    }))
+  };
+  await msalAtomicWrite(path.join(INDEX_ROOT, '.pending-notebook.json'), JSON.stringify(pending, null, 2));
+  return runIndexMerge(INDEX_ROOT);
+}
+
+function mergeErrorText(merge) {
+  return `❌ Index audit finished but the merge failed: ${merge.error || merge.err || `exit code ${merge.code}`}\n\n${INDEX_ROOT}/.pending-notebook.json was kept and the checkpoint is intact — call refreshNotebookIndex again (it will retry only the merge), or run \`python3 ${INDEX_ROOT}/merge_notebook.py\` to finish the merge.`;
+}
+
+function checkpointRemaining(cp) {
+  return cp.candidates.filter(c => !cp.donePageIds[c.pageId] && (cp.failures[c.pageId] || 0) < MAX_FETCH_FAILURES).length;
+}
+
+server.tool(
+  'refreshNotebookIndex',
+  {
+    notebookId: z.string().describe('The ID of the notebook to audit and merge into the local index (index.json / INDEX.md).'),
+    batchSize: z.number().int().min(1).max(INDEX_BATCH_SIZE).default(INDEX_BATCH_SIZE).describe(`Pages fetched+summarized per call (hard cap ${INDEX_BATCH_SIZE}). The rest of the queue resumes from the checkpoint on the next call.`).optional(),
+    timeBudgetMs: z.number().min(5000).max(120000).default(45000).describe('Wall-clock budget for this call (default 45000ms). A partial batch is checkpointed and the next call continues where it stopped.'),
+    about: z.string().describe('Optional one-line description of the notebook for the digest (overrides the existing one; only applied when starting a new audit).').optional()
+  },
+  async ({ notebookId, batchSize, timeBudgetMs, about }) => {
+    try {
+      await ensureGraphClient();
+      const startedAt = Date.now();
+      const budgetLeft = () => timeBudgetMs - (Date.now() - startedAt);
+
+      if (!fs.existsSync(path.join(INDEX_ROOT, 'index.json'))) {
+        return { isError: true, content: [{ type: 'text', text: `❌ No local index found at ${INDEX_ROOT}/index.json — bootstrap it before auditing.` }] };
+      }
+
+      // --- Checkpoint gate: single-slot, one notebook audit in flight ---
+      const prior = loadRefreshCheckpoint();
+      if (prior && prior.notebookId !== notebookId) {
+        return { isError: true, content: [{ type: 'text', text: `⏸️ An audit for "${prior.notebookName}" (${prior.notebookId}) is in progress with ${checkpointRemaining(prior)} pages left. Call refreshNotebookIndex with THAT notebookId to continue it (or delete ${CHECKPOINT_FILE} to abandon it).` }] };
+      }
+
+      // --- Resolve notebook ---
+      if (!notebookCache) await refreshNotebookCache(true);
+      let notebook = notebookCache?.find(nb => nb.id === notebookId) || null;
+      if (!notebook) {
+        try {
+          notebook = await graphClient.api(`/me/onenote/notebooks/${notebookId}`).get();
+        } catch {
+          return { isError: true, content: [{ type: 'text', text: `Notebook ${notebookId} not found. Use listNotebooks to get valid IDs.` }] };
+        }
+      }
+      const nbName = notebook.displayName || notebook.name || 'Untitled';
+      const basePath = await getBasePathForNotebook(notebookId);
+      const existing = loadLocalIndexJson();
+      const existingNb = existing.notebooks.find(n => n.id === notebookId) || existing.notebooks.find(n => n.name === nbName) || null;
+
+      // --- Fast path: previous call summarized everything but the merge failed ---
+      if (prior && prior.status === 'complete') {
+        const merge = await handOffToMerge(prior);
+        if (!merge.ok) return { isError: true, content: [{ type: 'text', text: mergeErrorText(merge) }] };
+        await clearRefreshCheckpoint();
+        return { content: [{ type: 'text', text: `✅ **${nbName}** audit completed — retried the merge after the earlier failure.\n- Merge: ${merge.out || 'ok'}` }] };
+      }
+
+      // --- New audit: list sections + pages once, freeze the candidate queue ---
+      let cp = prior;
+      if (!cp) {
+        cp = {
+          notebookId,
+          notebookName: nbName,
+          basePath,
+          about: about || existingNb?.about || null,
+          batchSize,
+          status: 'in-progress',
+          startedAt: new Date().toISOString(),
+          sections: [],
+          candidates: [],
+          donePageIds: {},
+          failures: {},
+          baseNotes: {},
+          stats: { llm: 0, cache: 0, fallback: 0, fetchFailures: 0, batches: 0 }
+        };
+        const sections = await paginateGraphRequest(`${basePath}/notebooks/${notebookId}/sections`);
+        sections.forEach(s => registerSectionMapping(s.id, notebookId));
+        const auditedDate = existingNb?.lastAudited ? new Date(existingNb.lastAudited) : null;
+
+        for (const section of sections) {
+          const secName = section.displayName || section.name || 'Untitled';
+          // Single call with an explicit $top=100 (MCP gotcha: omitting top fails;
+          // we intentionally do NOT follow nextLinks so capped sections stay capped).
+          const response = await retryWithBackoff(() =>
+            graphClient.api(`${basePath}/sections/${section.id}/pages?$select=id,title,createdDateTime,lastModifiedDateTime&$top=${INDEX_LISTING_TOP}&$orderby=lastModifiedDateTime desc`).get()
+          );
+          const sectionPages = response.value || [];
+          const existingSec = existingNb?.sections?.find(s => s.id === section.id) || null;
+          cp.sections.push({
+            name: secName,
+            id: section.id,
+            pageTotal: sectionPages.length,
+            ...(sectionPages.length >= INDEX_LISTING_TOP ? { capped: true } : {}),
+            ...(existingSec?.pattern ? { pattern: existingSec.pattern } : {}),
+            pages: sectionPages.slice(0, INDEX_PAGES_PER_SECTION).map(p => ({
+              title: p.title || 'Untitled',
+              id: p.id,
+              date: (p.lastModifiedDateTime || p.createdDateTime || '').slice(0, 10),
+              lastModifiedDateTime: p.lastModifiedDateTime || p.createdDateTime || null
+            }))
+          });
+          cp.baseNotes[section.id] = { ...(existingSec?.notes || {}) };
+          // Candidates: listed pages (top 25) missing a pageSummary, or whose
+          // content changed since the last audit. Frozen at audit start so every
+          // batch of this audit works off the same ordered queue.
+          for (const p of sectionPages.slice(0, INDEX_PAGES_PER_SECTION)) {
+            const stale = auditedDate instanceof Date && !isNaN(auditedDate) && new Date(p.lastModifiedDateTime) > auditedDate;
+            if (!cp.baseNotes[section.id][p.title] || stale) {
+              cp.candidates.push({
+                pageId: p.id,
+                title: p.title || 'Untitled',
+                sectionId: section.id,
+                lastModifiedDateTime: p.lastModifiedDateTime || p.createdDateTime || null
+              });
+            }
+          }
+        }
+        cp.candidates.sort((a, b) => new Date(b.lastModifiedDateTime) - new Date(a.lastModifiedDateTime));
+        await saveRefreshCheckpoint(cp);
+      } else {
+        // Resuming a checkpointed audit: re-register section mappings from the frozen snapshot.
+        cp.sections.forEach(s => registerSectionMapping(s.id, notebookId));
+        cp.baseNotes = cp.baseNotes || {};
+        cp.donePageIds = cp.donePageIds || {};
+        cp.failures = cp.failures || {};
+        cp.stats = cp.stats || { llm: 0, cache: 0, fallback: 0, fetchFailures: 0, batches: 0 };
+      }
+
+      // --- Process ONE batch (≤ batchSize pages), checkpointing after every page ---
+      let batchProcessed = 0;
+      for (const cand of cp.candidates) {
+        if (cp.donePageIds[cand.pageId]) continue;
+        if ((cp.failures[cand.pageId] || 0) >= MAX_FETCH_FAILURES) continue; // keep existing (stale) note
+        if (batchProcessed >= batchSize) break; // batch full — the rest resumes on the next call
+        if (budgetLeft() < 15000) break; // mid-batch stop; the partial batch is checkpointed
+        let html;
+        try {
+          html = await fetchPageContentAdvanced(cand.pageId, 'httpDirect', cp.basePath);
+        } catch (error) {
+          cp.failures[cand.pageId] = (cp.failures[cand.pageId] || 0) + 1;
+          cp.stats.fetchFailures += 1;
+          console.error(`Failed to fetch content for "${cand.title}": ${error.message}`);
+          await saveRefreshCheckpoint(cp); // persist the failure count; retried next batch/run
+          continue;
+        }
+        // pageSummary is derived from the LLM (llama inference path) with a
+        // deterministic fallback — this is what gets written into the index.
+        const { summary, source } = await summarizeContent(html, {
+          title: cand.title,
+          cacheKey: `${cand.pageId}:${cand.lastModifiedDateTime}`,
+          maxLength: LLM_MAX_SUMMARY_CHARS
+        });
+        (cp.baseNotes[cand.sectionId] = cp.baseNotes[cand.sectionId] || {})[cand.title] = summary;
+        cp.donePageIds[cand.pageId] = true;
+        if (source === 'llm') cp.stats.llm += 1;
+        else if (source === 'cache') cp.stats.cache += 1;
+        else cp.stats.fallback += 1;
+        batchProcessed += 1;
+        await saveRefreshCheckpoint(cp); // durable progress after every page
+      }
+      cp.stats.batches += 1;
+
+      // --- Done? Hand off to merge_notebook.py (it owns the index files) ---
+      const remaining = checkpointRemaining(cp);
+      if (remaining === 0) {
+        const merge = await handOffToMerge(cp);
+        if (merge.ok) {
+          await clearRefreshCheckpoint();
+          let text = `✅ **${nbName}** audited (COMPLETE) — local index updated with LLM page summaries\n`;
+          text += `- Sections: ${cp.sections.length} · pages listed: ${cp.sections.reduce((n, s) => n + s.pages.length, 0)}\n`;
+          text += `- pageSummary (model: ${LLM_MODEL}): ${cp.stats.llm} new · ${cp.stats.cache} cached · ${cp.stats.fallback} fallback${cp.stats.fetchFailures ? ` · ${cp.stats.fetchFailures} fetch failures` : ''} across ${cp.stats.batches} batches\n`;
+          text += `- Merge: ${merge.out || 'ok'}`;
+          return { content: [{ type: 'text', text }] };
+        }
+        cp.status = 'complete'; // all summaries done — the next call retries only the merge
+        await saveRefreshCheckpoint(cp);
+        return { isError: true, content: [{ type: 'text', text: mergeErrorText(merge) }] };
+      }
+
+      await saveRefreshCheckpoint(cp);
+      const perSection = cp.sections
+        .map(s => {
+          const left = cp.candidates.filter(c => c.sectionId === s.id && !cp.donePageIds[c.pageId] && (cp.failures[c.pageId] || 0) < MAX_FETCH_FAILURES).length;
+          return left ? `${s.name}: ${left}` : null;
+        })
+        .filter(Boolean)
+        .slice(0, 8)
+        .join(' · ');
+      let text = `⏳ **${nbName}** audit in progress — batch ${cp.stats.batches} done\n`;
+      text += `- This call: ${batchProcessed} pages summarized · ${remaining} pages still queued (resumes from ${path.basename(CHECKPOINT_FILE)})\n`;
+      if (perSection) text += `- Per section: ${perSection}\n`;
+      text += `- Call refreshNotebookIndex again with the same notebookId to continue (each call = one batch of ≤ ${INDEX_BATCH_SIZE} pages).`;
+      return { content: [{ type: 'text', text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: 'text', text: `Failed to refresh notebook index: ${error.message}` }] };
+    }
+  }
+);
+
 server.tool(
   'getPageContent',
   {
@@ -2598,6 +3150,7 @@ async function main() {
     console.error('   🔐 Auth: authenticate, saveAccessToken, checkTokenScopes');
     console.error('   📚 Read: listNotebooks, listSections, listPagesInSection, searchPages, searchPagesByDate, searchPageContent, searchInNotebook, getPageContent, getPageByTitle');
     console.error('   📝 Productivity: getMyRecentChanges, createDailyNote');
+    console.error('   📗 Index: refreshNotebookIndex (LLM page summaries → index.json / INDEX.md)');
     console.error('   ✏️ Edit: updatePageContent, appendToPage, updatePageTitle, replaceTextInPage, addNoteToPage, addTableToPage');
     console.error('   ➕ Create: createPage');
     console.error('---------------------------------');
@@ -2609,6 +3162,15 @@ async function main() {
     process.on('SIGTERM', () => {
       console.error('\n🔌 OneNote MCP Server terminated...');
       process.exit(0);
+    });
+
+    // Keep the stdio MCP server alive across async library errors
+    // (e.g. token-cache init failures) instead of silently dying.
+    process.on('unhandledRejection', (reason) => {
+      console.error('⚠️ Unhandled rejection (server kept alive):', reason instanceof Error ? reason.message : reason);
+    });
+    process.on('uncaughtException', (err) => {
+      console.error('⚠️ Uncaught exception (server kept alive):', err.message);
     });
 
   } catch (error) {

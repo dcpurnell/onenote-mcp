@@ -17,6 +17,8 @@ yarn-error.log*
 .access-token.txt
 .notebook-cache.json
 .auth-record.json
+.msal-cache-*.json
+.msal-cache-*.json.lockfile
 
 # OS files
 .DS_Store
@@ -37,3 +39,12 @@ test-results/
 
 # Test fixtures that shouldn't be committed
 tests/fixtures/.test-access-token.txt
+
+# MSAL cache last-good snapshot (token material — never commit)
+.msal-cache-*.json.lastgood
+
+# Local OneNote index (personal notebook content — never commit)
+INDEX.md
+index.json
+.refresh-checkpoint.json
+.pending-notebook.json
